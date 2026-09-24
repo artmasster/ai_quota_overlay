@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
+<title>Quota overlay</title>
+<style>
+  :root {
+    --bg: rgba(17, 19, 24, 0.86);
+    --panel: rgba(22, 24, 31, 0.96);
+    --line: rgba(255, 255, 255, 0.08);
+    --text: #eceef2;
+    --muted: #8b90a0;
+    --track: rgba(255, 255, 255, 0.12);
+    --ok: #4ade80;
+    --warn: #fbbf24;
+    --bad: #f87171;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { background: transparent; overflow: hidden; }
+  /* The window is larger than the card: the spare room holds the detail panel and is click-through. */
+  body {
+    position: fixed;
+    inset: 0;
+    font: 11px/1.3 "Segoe UI", "Leelawadee UI", Tahoma, sans-serif;
+    color: var(--text);
+    user-select: none;
+  }
+
+  /* ---------- compact card ---------- */
+  .card {
+    position: absolute; left: 2px; top: 2px;
+    display: flex; gap: 10px;
+    padding: 6px 9px 5px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    white-space: nowrap;
+    cursor: grab;
+    transition: border-color .15s;
+  }
+  body.anchor-right .card { left: auto; right: 2px; }
+  body.anchor-bottom .card { top: auto; bottom: 2px; }
+  .card:hover { border-color: rgba(255, 255, 255, .2); }
+  body.dragging .card { cursor: grabbing; }
+  body.loading .card { border-color: rgba(255, 255, 255, .3); }
+  .svc { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+  .svc + .svc { padding-left: 10px; border-left: 1px solid var(--line); }
+  .name { font-size: 10px; font-weight: 600; letter-spacing: .02em; }
+  .rings { display: flex; gap: 6px; }
+  body.vertical .card { flex-direction: column; gap: 6px; padding: 7px 6px 5px; }
+  body.vertical .svc + .svc { padding-left: 0; border-left: 0; padding-top: 6px; border-top: 1px solid var(--line); }
+  body.vertical .rings { flex-direction: column; gap: 3px; }
+  body.vertical .empty { white-space: normal; width: 70px; text-align: center; }
+  .ring {
+    display: flex; flex-direction: column; align-items: center;
+    border-radius: 9px; padding: 2px 2px 1px;
+    cursor: pointer;
+    transition: background .12s, box-shadow .12s;
+  }
+  .ring:hover { background: rgba(255, 255, 255, .07); }
+  .ring.sel { background: color-mix(in srgb, var(--accent) 20%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent); }
+  .ring svg { display: block; }
+  .ring text { font-weight: 700; font-size: 10.5px; fill: var(--text); font-variant-numeric: tabular-nums; }
+  .lbl { color: var(--muted); font-size: 9.5px; margin-top: 1px; }
+  .empty { color: var(--muted); padding: 2px 4px; }
+
+  /* ---------- detail panel ---------- */
+  .detail {
+    position: absolute;
+    width: 248px;
+    padding: 10px 12px 11px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, .25);
+    display: none;
+    cursor: default;
+  }
+  .detail::before {
+    content: ""; position: absolute; left: 14px; right: 14px; top: 0; height: 2px;
+    border-radius: 0 0 2px 2px; background: var(--accent);
+  }
+  .detail.show { display: block; animation: pop .14s ease-out; }
+  @keyframes pop { from { opacity: 0; transform: scale(.97); } to { opacity: 1; transform: none; } }
+  .d-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+  .d-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+  .d-name { font-weight: 600; font-size: 12.5px; }
+  .d-badge {
+    font-size: 9.5px; font-weight: 600; letter-spacing: .06em;
+    color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent);
+    padding: 1px 6px; border-radius: 6px;
+  }
+  .d-close {
+    margin-left: auto; width: 20px; height: 20px; border: 0; border-radius: 6px;
+    background: transparent; color: var(--muted); font-size: 15px; line-height: 20px; cursor: pointer;
+  }
+  .d-close:hover { background: rgba(255, 255, 255, .08); color: var(--text); }
+  .d-main { display: flex; align-items: center; gap: 12px; }
+  .d-main svg { flex: none; }
+  .d-main svg text { fill: var(--muted); font-size: 11px; font-weight: 600; }
+  .d-big { font-size: 26px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+  .d-big small { font-size: 13px; font-weight: 600; margin-left: 1px; }
+  .d-cap { color: var(--muted); font-size: 11px; margin-top: 3px; }
+  .d-rows { margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--line); display: grid; gap: 4px; }
+  .d-row { display: flex; align-items: center; gap: 7px; font-size: 11.5px; }
+  .d-row svg { flex: none; opacity: .75; }
+  .d-row .when { margin-left: auto; color: var(--muted); font-size: 11px; }
+  .d-err { color: var(--warn); font-size: 11.5px; line-height: 1.45; }
+  .d-hint { color: var(--muted); font-size: 10.5px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<div class="card" id="card"><span class="empty">…</span></div>
+<div class="detail" id="detail"></div>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const GAP = 4;
+  const PAD = 2;
+  const SERVICES = [
+    { key: 'claude', name: 'Claude', color: '#d97757' },
+    { key: 'codex', name: 'Codex', color: '#10a37f' },
+    { key: 'cursor', name: 'Cursor', color: '#a5b4fc' },
+  ];
+  const ICON_CLOCK = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="8" cy="8" r="6.3"/><path d="M8 4.6V8l2.3 1.5"/></svg>';
+  const ICON_COIN = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><ellipse cx="8" cy="5" rx="5.5" ry="2.3"/><path d="M2.5 5v6c0 1.3 2.5 2.3 5.5 2.3s5.5-1 5.5-2.3V5M2.5 8c0 1.3 2.5 2.3 5.5 2.3s5.5-1 5.5-2.3"/></svg>';
+
+  let data = null;
+  let selected = null; // { svc, index }
+  let anchor = { right: true, bottom: true };
+  let vertical = false;
+
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const color = (left) => (left > 50 ? 'var(--ok)' : left > 20 ? 'var(--warn)' : 'var(--bad)');
+  const short = (label) => label.replace(' ชม.', 'ช').replace(' วัน', 'ว').replace('รอบบิล', 'บิล');
+  // Label under a ring: time left until reset in its largest whole unit; window name if no reset time.
+  function leftLabel(w) {
+    if (!w.resetsAt) return short(w.label);
+    const m = Math.max(0, Math.floor((w.resetsAt - Date.now()) / 60000));
+    if (m >= 1440) return `${Math.floor(m / 1440)} วัน`;
+    if (m >= 60) return `${Math.floor(m / 60)} ชม`;
+    return `${m} นาที`;
+  }
+  const clamp = (v) => Math.max(0, Math.min(100, v));
+  const svcOf = (key) => SERVICES.find((s) => s.key === key);
+
+  function ringSvg(size, stroke, left, text) {
+    const r = size / 2 - stroke / 2 - 1;
+    const c = 2 * Math.PI * r;
+    const h = size / 2;
+    return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+      <circle cx="${h}" cy="${h}" r="${r}" fill="none" stroke="var(--track)" stroke-width="${stroke}"/>
+      <circle cx="${h}" cy="${h}" r="${r}" fill="none" stroke="${left > 0 ? color(left) : 'none'}" stroke-width="${stroke}"
+        stroke-linecap="round" stroke-dasharray="${(clamp(left) / 100) * c} ${c}" transform="rotate(-90 ${h} ${h})"/>
+      <text x="${h}" y="${h}" text-anchor="middle" dominant-baseline="central">${esc(text)}</text>
+    </svg>`;
+  }
+
+  function untilText(ts) {
+    let s = Math.max(0, Math.round((ts - Date.now()) / 1000));
+    const d = Math.floor(s / 86400); s %= 86400;
+    const h = Math.floor(s / 3600); s %= 3600;
+    const m = Math.floor(s / 60);
+    return d ? `${d} วัน ${h} ชม.` : h ? `${h} ชม. ${m} นาที` : `${m} นาที`;
+  }
+
+  function whenText(ts) {
+    const t = new Date(ts);
+    const time = t.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+    const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    const diff = Math.round((day(t) - day(new Date())) / 86400000);
+    if (diff === 0) return `วันนี้ ${time}`;
+    if (diff === 1) return `พรุ่งนี้ ${time}`;
+    return `${t.toLocaleDateString('th-TH', { weekday: 'short', day: 'numeric', month: 'short' })} ${time}`;
+  }
+
+  // ---------- compact card ----------
+  function renderCard() {
+    const shown = SERVICES.filter((s) => data[s.key] && !data[s.key].absent);
+    if (selected && !shown.some((s) => s.key === selected.svc)) selected = null;
+    if (!shown.length) {
+      $('card').innerHTML = '<span class="empty">Not logged in to Claude, Codex or Cursor</span>';
+      return;
+    }
+    const ring = (s, index, left, label, text) => {
+      const sel = selected?.svc === s.key && selected.index === index ? ' sel' : '';
+      return `<div class="ring${sel}" style="--accent:${s.color}" data-svc="${s.key}" data-index="${index}">
+        ${ringSvg(36, 4, left, text ?? Math.round(left))}<span class="lbl">${esc(label)}</span></div>`;
+    };
+    $('card').innerHTML = shown.map((s) => {
+      const r = data[s.key];
+      const rings = !r.ok ? ring(s, -1, 0, 'error', '!')
+        : r.windows.length ? r.windows.map((w, i) => ring(s, i, 100 - w.usedPercent, leftLabel(w))).join('')
+        : ring(s, -1, 0, 'ไม่มีข้อมูล', '–');
+      return `<div class="svc"><span class="name" style="color:${s.color}">${s.name}</span><div class="rings">${rings}</div></div>`;
+    }).join('');
+  }
+
+  // ---------- detail panel ----------
+  function detailHtml(s, r, index) {
+    const badge = r.ok && r.plan ? `<span class="d-badge">${esc(r.plan.toUpperCase())}</span>` : '';
+    const head = `<div class="d-head"><span class="d-dot"></span><span class="d-name">${s.name}</span>${badge}
+      <button class="d-close" title="Close">×</button></div>`;
+
+    if (!r.ok) {
+      return `${head}<div class="d-err">${esc(r.error)}</div>
+        <div class="d-hint">ดับเบิลคลิกที่กล่องเพื่อลองใหม่</div>`;
+    }
+    if (index < 0) return `${head}<div class="d-cap">ไม่มีข้อมูลโควต้า</div>`;
+
+    const w = r.windows[index];
+    const left = clamp(100 - w.usedPercent);
+    const rows = [];
+    if (w.resetsAt) {
+      rows.push(`<div class="d-row">${ICON_CLOCK}<span>รีเซ็ตใน <b>${untilText(w.resetsAt)}</b></span><span class="when">${whenText(w.resetsAt)}</span></div>`);
+    }
+    if (s.key === 'codex' && r.credits) {
+      rows.push(`<div class="d-row">${ICON_COIN}<span>เครดิตเหลือ <b>${Math.floor(r.credits.balance).toLocaleString()}</b></span></div>`);
+    } else if (r.extra) {
+      rows.push(`<div class="d-row">${ICON_COIN}<span>ใช้เกินแพ็กเกจ <b>$${(r.extra.used / 100).toFixed(2)}</b> / $${(r.extra.limit / 100).toFixed(0)}</span></div>`);
+    }
+    return `${head}
+      <div class="d-main">
+        ${ringSvg(58, 6, left, w.label)}
+        <div>
+          <div class="d-big" style="color:${color(left)}">${Math.round(left)}<small>%</small></div>
+          <div class="d-cap">เหลือ · ใช้ไป ${Math.round(w.usedPercent)}%</div>
+        </div>
+      </div>
+      ${rows.length ? `<div class="d-rows">${rows.join('')}</div>` : ''}`;
+  }
+
+  // Panel goes in the reserved room: above/below the card when horizontal, beside it when vertical,
+  // aligned to the card edge that faces the screen border.
+  function placePanel() {
+    const c = $('card').getBoundingClientRect();
+    const st = $('detail').style;
+    st.left = st.right = st.top = st.bottom = 'auto';
+    if (vertical) {
+      st[anchor.right ? 'right' : 'left'] = `${PAD + c.width + GAP}px`;
+      st[anchor.bottom ? 'bottom' : 'top'] = `${PAD}px`;
+    } else {
+      st[anchor.right ? 'right' : 'left'] = `${PAD}px`;
+      st[anchor.bottom ? 'bottom' : 'top'] = `${PAD + c.height + GAP}px`;
+    }
+  }
+
+  function renderDetail(animate = false) {
+    const el = $('detail');
+    const s = selected && svcOf(selected.svc);
+    if (!s || !data) {
+      el.classList.remove('show');
+      return;
+    }
+    el.style.setProperty('--accent', s.color);
+    el.innerHTML = detailHtml(s, data[s.key], selected.index);
+    if (animate) el.classList.remove('show');
+    placePanel();
+    if (animate) void el.offsetWidth; // restart the pop animation
+    el.classList.add('show');
+  }
+
+  function select(next) {
+    selected = next && !(selected && selected.svc === next.svc && selected.index === next.index) ? next : null;
+    renderCard();
+    renderDetail(true);
+  }
+
+  // Report the card size whenever it changes (new data, rotation); the window is sized from it.
+  new ResizeObserver(() => {
+    const c = $('card').getBoundingClientRect();
+    window.overlay.cardSize({ w: c.width, h: c.height });
+  }).observe($('card'));
+
+  // Only the card and an open panel take the mouse; the rest of the window is click-through.
+  let interactive = false;
+  function setInteractive(on) {
+    if (on === interactive) return;
+    interactive = on;
+    window.overlay.interactive(on);
+  }
+  document.addEventListener('mousemove', (e) => {
+    if (!drag) setInteractive(!!e.target.closest?.('.card, .detail.show'));
+  });
+  document.addEventListener('mouseleave', () => { if (!drag) setInteractive(false); });
+
+  // Card: drag to move, click a ring to open its details, click elsewhere on the card to close.
+  let drag = null;
+  $('card').addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    drag = { x: e.screenX, y: e.screenY, moving: false, target: e.target };
+    $('card').setPointerCapture(e.pointerId);
+  });
+  $('card').addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    const dx = e.screenX - drag.x;
+    const dy = e.screenY - drag.y;
+    if (!drag.moving && Math.hypot(dx, dy) < 4) return;
+    if (!drag.moving) {
+      drag.moving = true;
+      document.body.classList.add('dragging');
+      window.overlay.dragStart();
+    }
+    window.overlay.dragMove({ dx, dy });
+  });
+  $('card').addEventListener('pointerup', () => {
+    if (!drag) return;
+    if (drag.moving) {
+      window.overlay.dragEnd();
+    } else {
+      const r = drag.target.closest('.ring');
+      select(r ? { svc: r.dataset.svc, index: Number(r.dataset.index) } : null);
+    }
+    drag = null;
+    document.body.classList.remove('dragging');
+  });
+  $('card').addEventListener('dblclick', (e) => { if (!e.target.closest('.ring')) window.overlay.refresh(); });
+  $('card').addEventListener('contextmenu', (e) => { e.preventDefault(); window.overlay.menu(); });
+  $('detail').addEventListener('click', (e) => { if (e.target.closest('.d-close')) select(null); });
+
+  window.overlay.onQuota((d) => {
+    data = d;
+    document.body.classList.remove('loading');
+    renderCard();
+    renderDetail();
+  });
+  window.overlay.onLoading(() => document.body.classList.add('loading'));
+  window.overlay.onAnchor((a) => {
+    anchor = a;
+    document.body.classList.toggle('anchor-right', a.right);
+    document.body.classList.toggle('anchor-bottom', a.bottom);
+    renderDetail();
+  });
+  window.overlay.onLayout((l) => {
+    vertical = l.vertical;
+    document.body.classList.toggle('vertical', vertical);
+    renderDetail();
+  });
+  setInterval(() => { if (data) renderCard(); renderDetail(); }, 30 * 1000);
+</script>
+</body>
+</html>

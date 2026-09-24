@@ -1,0 +1,76 @@
+name: Release
+
+# Push a tag like v1.2.3 to build Windows / macOS / Linux packages and publish a GitHub Release.
+# Run manually (Actions → Release → Run workflow) to build without releasing; files land in the run's artifacts.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: --win
+          - os: macos-latest
+            target: --mac
+          - os: ubuntu-latest
+            target: --linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 22: Node 24's unzip breaks the Electron download (see README → Development).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build
+        run: npx electron-builder ${{ matrix.target }} --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.os }}
+          path: |
+            dist/*.exe
+            dist/*.dmg
+            dist/*.AppImage
+            dist/*.deb
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            ## Download
+
+            | OS | File |
+            |---|---|
+            | Windows 10/11 | `AiQuotaOverlay-*-win-x64-setup.exe` |
+            | macOS (Apple Silicon) | `AiQuotaOverlay-*-mac-arm64.dmg` |
+            | macOS (Intel) | `AiQuotaOverlay-*-mac-x64.dmg` |
+            | Linux | `AiQuotaOverlay-*-linux-x86_64.AppImage` or `.deb` |
+
+            The builds are not code-signed. See the README for the one-time "open anyway" steps.
