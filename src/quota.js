@@ -3,7 +3,6 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-
 const { execFileSync } = require('node:child_process');
 
 const HOME = os.homedir();
@@ -105,14 +104,10 @@ async function claudeAccessToken(force = false) {
 }
 
 async function fetchClaude() {
-  const plan = (() => {
-    try { return readClaudeOauth().oauth?.subscriptionType ?? ''; } catch { return ''; }
-  })();
-
-  const call = async (token) =>
-    fetch('https://api.anthropic.com/api/oauth/usage', {
-      headers: { Authorization: `Bearer ${token}`, 'anthropic-beta': 'oauth-2025-04-20' },
-    });
+  const plan = readClaudeOauth().oauth?.subscriptionType ?? '';
+  const call = (token) => fetch('https://api.anthropic.com/api/oauth/usage', {
+    headers: { Authorization: `Bearer ${token}`, 'anthropic-beta': 'oauth-2025-04-20' },
+  });
 
   let res = await call(await claudeAccessToken());
   if (res.status === 401) res = await call(await claudeAccessToken(true));
@@ -120,17 +115,14 @@ async function fetchClaude() {
   if (!res.ok) throw new QuotaError(`Claude ตอบ ${res.status}`);
   const data = await res.json();
 
-  const windows = [];
-  for (const [key, w] of Object.entries(data)) {
-    if (!w || typeof w.utilization !== 'number') continue;
+  const windows = Object.entries(data)
     // Unknown internal buckets without a reset time are placeholders, not real limits.
-    if (!CLAUDE_LABELS[key] && !w.resets_at) continue;
-    windows.push({
+    .filter(([key, w]) => typeof w?.utilization === 'number' && (CLAUDE_LABELS[key] || w.resets_at))
+    .map(([key, w]) => ({
       label: CLAUDE_LABELS[key] ?? key.replaceAll('_', ' '),
       usedPercent: w.utilization,
       resetsAt: w.resets_at ? Date.parse(w.resets_at) : null,
-    });
-  }
+    }));
   const extra = data.extra_usage?.is_enabled
     ? { used: data.extra_usage.used_credits, limit: data.extra_usage.monthly_limit }
     : null;
@@ -159,16 +151,12 @@ async function fetchCodex() {
   if (!res.ok) throw new QuotaError(`Codex ตอบ ${res.status}`);
   const data = await res.json();
 
-  const windows = [];
   const rl = data.rate_limit ?? {};
-  for (const w of [rl.primary_window, rl.secondary_window]) {
-    if (!w) continue;
-    windows.push({
-      label: windowLabel(w.limit_window_seconds),
-      usedPercent: w.used_percent,
-      resetsAt: w.reset_at ? w.reset_at * 1000 : Date.now() + w.reset_after_seconds * 1000,
-    });
-  }
+  const windows = [rl.primary_window, rl.secondary_window].filter(Boolean).map((w) => ({
+    label: windowLabel(w.limit_window_seconds),
+    usedPercent: w.used_percent,
+    resetsAt: w.reset_at ? w.reset_at * 1000 : Date.now() + w.reset_after_seconds * 1000,
+  }));
   const credits = data.credits?.has_credits && !data.credits.unlimited
     ? { balance: Number(data.credits.balance) }
     : null;
@@ -190,42 +178,40 @@ function readCursorAuth() {
   }
 }
 
+const CURSOR_EXPIRED = 'login หมดอายุ — เปิดแอป Cursor สักครั้ง';
+
 async function fetchCursor() {
   const { token, plan } = readCursorAuth();
   const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
-  if (payload.exp && payload.exp * 1000 < Date.now()) throw new QuotaError('login หมดอายุ — เปิดแอป Cursor สักครั้ง');
+  if (payload.exp && payload.exp * 1000 < Date.now()) throw new QuotaError(CURSOR_EXPIRED);
   const userId = String(payload.sub).split('|').pop();
   const headers = { Cookie: `WorkosCursorSessionToken=${userId}%3A%3A${token}`, Origin: 'https://cursor.com' };
 
   // Current (usage-based) plans.
   const res = await fetch('https://cursor.com/api/usage-summary', { headers });
-  if (res.status === 401 || res.status === 403) throw new QuotaError('login หมดอายุ — เปิดแอป Cursor สักครั้ง');
+  if (res.status === 401 || res.status === 403) throw new QuotaError(CURSOR_EXPIRED);
   if (res.ok) {
     const data = await res.json();
     const p = data.individualUsage?.plan;
-    const windows = [];
-    if (p) {
-      const used = typeof p.totalPercentUsed === 'number'
-        ? p.totalPercentUsed
-        : p.limit ? (p.used / p.limit) * 100 : 0;
-      windows.push({ label: 'รอบบิล', usedPercent: used, resetsAt: data.billingCycleEnd ? Date.parse(data.billingCycleEnd) : null });
-    }
+    const windows = p ? [{
+      label: 'รอบบิล',
+      usedPercent: typeof p.totalPercentUsed === 'number' ? p.totalPercentUsed : p.limit ? (p.used / p.limit) * 100 : 0,
+      resetsAt: data.billingCycleEnd ? Date.parse(data.billingCycleEnd) : null,
+    }] : [];
     const od = data.individualUsage?.onDemand;
     const extra = od?.enabled && od.limit ? { used: od.used, limit: od.limit } : null;
     return { plan: data.membershipType ?? plan, windows, extra };
   }
 
-  // Older request-count plans.
+  // Older request-count plans: one window per model, all resetting a month after startOfMonth.
   const old = await fetch(`https://cursor.com/api/usage?user=${encodeURIComponent(userId)}`, { headers });
   if (!old.ok) throw new QuotaError(`Cursor ตอบ ${res.status}/${old.status}`);
   const data = await old.json();
-  const windows = [];
-  for (const [model, u] of Object.entries(data)) {
-    if (!u?.maxRequestUsage) continue;
-    const start = data.startOfMonth ? new Date(data.startOfMonth) : null;
-    if (start) start.setMonth(start.getMonth() + 1);
-    windows.push({ label: model, usedPercent: (u.numRequests / u.maxRequestUsage) * 100, resetsAt: start?.getTime() ?? null });
-  }
+  const reset = data.startOfMonth ? new Date(data.startOfMonth) : null;
+  reset?.setMonth(reset.getMonth() + 1);
+  const windows = Object.entries(data)
+    .filter(([, u]) => u?.maxRequestUsage)
+    .map(([model, u]) => ({ label: model, usedPercent: (u.numRequests / u.maxRequestUsage) * 100, resetsAt: reset?.getTime() ?? null }));
   return { plan, windows, extra: null };
 }
 

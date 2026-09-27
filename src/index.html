@@ -115,10 +115,9 @@
 <div class="card" id="card"><span class="empty">…</span></div>
 <div class="detail" id="detail"></div>
 <script>
-  const $ = (id) => document.getElementById(id);
   // ?view=card shows the rings, ?view=panel the details of the ring that was clicked (see main.js).
   const view = new URLSearchParams(location.search).get('view');
-  const root = $(view === 'panel' ? 'detail' : 'card');
+  const root = document.getElementById(view === 'panel' ? 'detail' : 'card');
   document.body.classList.add(`view-${view}`);
   const SERVICES = [
     { key: 'claude', name: 'Claude', color: '#d97757' },
@@ -181,7 +180,7 @@
     const shown = SERVICES.filter((s) => data[s.key] && !data[s.key].absent);
     if (selected && !shown.some((s) => s.key === selected.svc)) window.overlay.select(null);
     if (!shown.length) {
-      $('card').innerHTML = '<span class="empty">Not logged in to Claude, Codex or Cursor</span>';
+      root.innerHTML = '<span class="empty">Not logged in to Claude, Codex or Cursor</span>';
       return;
     }
     const ring = (s, index, left, label, text) => {
@@ -189,7 +188,7 @@
       return `<div class="ring${sel}" style="--accent:${s.color}" data-svc="${s.key}" data-index="${index}">
         ${ringSvg(36, 4, left, text ?? Math.round(left))}<span class="lbl">${esc(label)}</span></div>`;
     };
-    $('card').innerHTML = shown.map((s) => {
+    root.innerHTML = shown.map((s) => {
       const r = data[s.key];
       const rings = !r.ok ? ring(s, -1, 0, 'error', '!')
         : r.windows.length ? r.windows.map((w, i) => ring(s, i, 100 - w.usedPercent, leftLabel(w))).join('')
