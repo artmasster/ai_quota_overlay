@@ -1,15 +1,19 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+const on = (channel) => (cb) => ipcRenderer.on(channel, (_e, value) => cb(value));
+const send = (channel) => (value) => ipcRenderer.send(channel, value);
+
 contextBridge.exposeInMainWorld('overlay', {
-  onQuota: (cb) => ipcRenderer.on('quota', (_e, data) => cb(data)),
-  onLoading: (cb) => ipcRenderer.on('loading', (_e, v) => cb(v)),
-  onAnchor: (cb) => ipcRenderer.on('anchor', (_e, a) => cb(a)),
-  onLayout: (cb) => ipcRenderer.on('layout', (_e, l) => cb(l)),
-  cardSize: (size) => ipcRenderer.send('card-size', size),
-  interactive: (on) => ipcRenderer.send('interactive', on),
-  refresh: () => ipcRenderer.send('refresh'),
-  menu: () => ipcRenderer.send('menu'),
-  dragStart: () => ipcRenderer.send('drag-start'),
-  dragMove: (d) => ipcRenderer.send('drag-move', d),
-  dragEnd: () => ipcRenderer.send('drag-end'),
+  onQuota: on('quota'),
+  onLoading: on('loading'),
+  onVertical: on('vertical'),
+  onSelected: on('selected'),
+  onReveal: on('reveal'),
+  size: send('size'),
+  select: send('select'),
+  refresh: send('refresh'),
+  menu: send('menu'),
+  dragStart: send('drag-start'),
+  dragMove: send('drag-move'),
+  dragEnd: send('drag-end'),
 });

@@ -18,7 +18,6 @@
   }
   * { box-sizing: border-box; margin: 0; }
   html, body { background: transparent; overflow: hidden; }
-  /* The window is larger than the card: the spare room holds the detail panel and is click-through. */
   body {
     position: fixed;
     inset: 0;
@@ -26,6 +25,8 @@
     color: var(--text);
     user-select: none;
   }
+  /* The page runs in two windows, the card's and the panel's; each window is fitted around its element. */
+  body.view-card .detail, body.view-panel .card { display: none; }
 
   /* ---------- compact card ---------- */
   .card {
@@ -39,8 +40,6 @@
     cursor: grab;
     transition: border-color .15s;
   }
-  body.anchor-right .card { left: auto; right: 2px; }
-  body.anchor-bottom .card { top: auto; bottom: 2px; }
   .card:hover { border-color: rgba(255, 255, 255, .2); }
   body.dragging .card { cursor: grabbing; }
   body.loading .card { border-color: rgba(255, 255, 255, .3); }
@@ -67,7 +66,7 @@
 
   /* ---------- detail panel ---------- */
   .detail {
-    position: absolute;
+    position: absolute; left: 2px; top: 2px;
     width: 248px;
     padding: 10px 12px 11px;
     background: var(--panel);
@@ -81,7 +80,9 @@
     content: ""; position: absolute; left: 14px; right: 14px; top: 0; height: 2px;
     border-radius: 0 0 2px 2px; background: var(--accent);
   }
-  .detail.show { display: block; animation: pop .14s ease-out; }
+  /* Laid out hidden first so main can move the window into place, then revealed. */
+  .detail.open { display: block; visibility: hidden; }
+  .detail.show { visibility: visible; animation: pop .14s ease-out; }
   @keyframes pop { from { opacity: 0; transform: scale(.97); } to { opacity: 1; transform: none; } }
   .d-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
   .d-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
@@ -115,8 +116,10 @@
 <div class="detail" id="detail"></div>
 <script>
   const $ = (id) => document.getElementById(id);
-  const GAP = 4;
-  const PAD = 2;
+  // ?view=card shows the rings, ?view=panel the details of the ring that was clicked (see main.js).
+  const view = new URLSearchParams(location.search).get('view');
+  const root = $(view === 'panel' ? 'detail' : 'card');
+  document.body.classList.add(`view-${view}`);
   const SERVICES = [
     { key: 'claude', name: 'Claude', color: '#d97757' },
     { key: 'codex', name: 'Codex', color: '#10a37f' },
@@ -127,8 +130,6 @@
 
   let data = null;
   let selected = null; // { svc, index }
-  let anchor = { right: true, bottom: true };
-  let vertical = false;
 
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const color = (left) => (left > 50 ? 'var(--ok)' : left > 20 ? 'var(--warn)' : 'var(--bad)');
@@ -177,7 +178,7 @@
   // ---------- compact card ----------
   function renderCard() {
     const shown = SERVICES.filter((s) => data[s.key] && !data[s.key].absent);
-    if (selected && !shown.some((s) => s.key === selected.svc)) selected = null;
+    if (selected && !shown.some((s) => s.key === selected.svc)) window.overlay.select(null);
     if (!shown.length) {
       $('card').innerHTML = '<span class="empty">Not logged in to Claude, Codex or Cursor</span>';
       return;
@@ -230,113 +231,86 @@
       ${rows.length ? `<div class="d-rows">${rows.join('')}</div>` : ''}`;
   }
 
-  // Panel goes in the reserved room: above/below the card when horizontal, beside it when vertical,
-  // aligned to the card edge that faces the screen border.
-  function placePanel() {
-    const c = $('card').getBoundingClientRect();
-    const st = $('detail').style;
-    st.left = st.right = st.top = st.bottom = 'auto';
-    if (vertical) {
-      st[anchor.right ? 'right' : 'left'] = `${PAD + c.width + GAP}px`;
-      st[anchor.bottom ? 'bottom' : 'top'] = `${PAD}px`;
-    } else {
-      st[anchor.right ? 'right' : 'left'] = `${PAD}px`;
-      st[anchor.bottom ? 'bottom' : 'top'] = `${PAD + c.height + GAP}px`;
-    }
-  }
-
-  function renderDetail(animate = false) {
-    const el = $('detail');
+  function renderDetail() {
     const s = selected && svcOf(selected.svc);
-    if (!s || !data) {
-      el.classList.remove('show');
-      return;
-    }
-    el.style.setProperty('--accent', s.color);
-    el.innerHTML = detailHtml(s, data[s.key], selected.index);
-    if (animate) el.classList.remove('show');
-    placePanel();
-    if (animate) void el.offsetWidth; // restart the pop animation
-    el.classList.add('show');
+    if (!s || !data) return;
+    root.style.setProperty('--accent', s.color);
+    root.innerHTML = detailHtml(s, data[s.key], selected.index);
   }
 
-  function select(next) {
-    selected = next && !(selected && selected.svc === next.svc && selected.index === next.index) ? next : null;
-    renderCard();
-    renderDetail(true);
+  function render() {
+    if (!data) return;
+    if (view === 'card') renderCard();
+    else renderDetail();
   }
 
-  // Report the card size whenever it changes (new data, rotation); the window is sized from it.
-  new ResizeObserver(() => {
-    const c = $('card').getBoundingClientRect();
-    window.overlay.cardSize({ w: c.width, h: c.height });
-  }).observe($('card'));
-
-  // Only the card and an open panel take the mouse; the rest of the window is click-through.
-  let interactive = false;
-  function setInteractive(on) {
-    if (on === interactive) return;
-    interactive = on;
-    window.overlay.interactive(on);
+  // Main fits this page's window around its element.
+  function reportSize() {
+    const r = root.getBoundingClientRect();
+    window.overlay.size({ w: r.width, h: r.height });
   }
-  document.addEventListener('mousemove', (e) => {
-    if (!drag) setInteractive(!!e.target.closest?.('.card, .detail.show'));
-  });
-  document.addEventListener('mouseleave', () => { if (!drag) setInteractive(false); });
-
-  // Card: drag to move, click a ring to open its details, click elsewhere on the card to close.
-  let drag = null;
-  $('card').addEventListener('pointerdown', (e) => {
-    if (e.button !== 0) return;
-    drag = { x: e.screenX, y: e.screenY, moving: false, target: e.target };
-    $('card').setPointerCapture(e.pointerId);
-  });
-  $('card').addEventListener('pointermove', (e) => {
-    if (!drag) return;
-    const dx = e.screenX - drag.x;
-    const dy = e.screenY - drag.y;
-    if (!drag.moving && Math.hypot(dx, dy) < 4) return;
-    if (!drag.moving) {
-      drag.moving = true;
-      document.body.classList.add('dragging');
-      window.overlay.dragStart();
-    }
-    window.overlay.dragMove({ dx, dy });
-  });
-  $('card').addEventListener('pointerup', () => {
-    if (!drag) return;
-    if (drag.moving) {
-      window.overlay.dragEnd();
-    } else {
-      const r = drag.target.closest('.ring');
-      select(r ? { svc: r.dataset.svc, index: Number(r.dataset.index) } : null);
-    }
-    drag = null;
-    document.body.classList.remove('dragging');
-  });
-  $('card').addEventListener('dblclick', (e) => { if (!e.target.closest('.ring')) window.overlay.refresh(); });
-  $('card').addEventListener('contextmenu', (e) => { e.preventDefault(); window.overlay.menu(); });
-  $('detail').addEventListener('click', (e) => { if (e.target.closest('.d-close')) select(null); });
+  new ResizeObserver(reportSize).observe(root);
 
   window.overlay.onQuota((d) => {
     data = d;
     document.body.classList.remove('loading');
-    renderCard();
-    renderDetail();
+    render();
   });
-  window.overlay.onLoading(() => document.body.classList.add('loading'));
-  window.overlay.onAnchor((a) => {
-    anchor = a;
-    document.body.classList.toggle('anchor-right', a.right);
-    document.body.classList.toggle('anchor-bottom', a.bottom);
-    renderDetail();
+  window.overlay.onSelected((next) => {
+    selected = next;
+    if (view === 'card') return render();
+    // Lay the panel out hidden and report its size; main moves the window there, then reveals it.
+    root.classList.remove('show');
+    root.classList.toggle('open', !!next);
+    if (next) {
+      renderDetail();
+      reportSize();
+    }
   });
-  window.overlay.onLayout((l) => {
-    vertical = l.vertical;
-    document.body.classList.toggle('vertical', vertical);
-    renderDetail();
-  });
-  setInterval(() => { if (data) renderCard(); renderDetail(); }, 30 * 1000);
+  // Ring labels and reset times count down.
+  setInterval(render, 30 * 1000);
+
+  if (view === 'panel') {
+    window.overlay.onReveal(() => root.classList.add('show'));
+    root.addEventListener('click', (e) => { if (e.target.closest('.d-close')) window.overlay.select(null); });
+  } else {
+    window.overlay.onLoading(() => document.body.classList.add('loading'));
+    window.overlay.onVertical((v) => document.body.classList.toggle('vertical', v));
+
+    // Drag to move, click a ring to open its details, click elsewhere on the card to close them.
+    let drag = null;
+    root.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      drag = { x: e.screenX, y: e.screenY, moving: false, target: e.target };
+      root.setPointerCapture(e.pointerId);
+    });
+    // Main moves the window from the real cursor position; the page only says when.
+    root.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      if (!drag.moving) {
+        if (Math.hypot(e.screenX - drag.x, e.screenY - drag.y) < 4) return;
+        drag.moving = true;
+        document.body.classList.add('dragging');
+        window.overlay.dragStart();
+      }
+      window.overlay.dragMove();
+    });
+    root.addEventListener('pointerup', () => {
+      if (!drag) return;
+      if (drag.moving) {
+        window.overlay.dragEnd();
+      } else {
+        const r = drag.target.closest('.ring');
+        const next = r && { svc: r.dataset.svc, index: Number(r.dataset.index) };
+        const same = next && selected?.svc === next.svc && selected.index === next.index;
+        window.overlay.select(same ? null : next);
+      }
+      drag = null;
+      document.body.classList.remove('dragging');
+    });
+    root.addEventListener('dblclick', (e) => { if (!e.target.closest('.ring')) window.overlay.refresh(); });
+    root.addEventListener('contextmenu', (e) => { e.preventDefault(); window.overlay.menu(); });
+  }
 </script>
 </body>
 </html>

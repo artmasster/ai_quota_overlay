@@ -6,6 +6,9 @@ const path = require('node:path');
 
 const OUT = path.join(__dirname, '..', 'docs');
 const ZOOM = 1.2 * 2; // app scale × 2 for crisp images on high-DPI screens
+const PAD = 2;        // css px around each element, so the panel's outline isn't cut off
+const GAP = 4;        // css px between the card and the panel, as in the app
+const MARGIN = 6;     // css px of transparent space around each image
 
 const now = Date.now();
 const H = 3600e3;
@@ -20,59 +23,75 @@ const demo = {
   cursor: { ok: true, plan: 'pro', windows: [{ label: 'รอบบิล', usedPercent: 86, resetsAt: now + 11.3 * D }], extra: null },
 };
 
-// name, css viewport size, layout, anchor, ring to click (index into .ring), data override
+// name, vertical, open panel ({ svc, index } of a ring), data override
 const SHOTS = [
-  ['hero', [330, 300], { vertical: false }, { right: true, bottom: true }, 0],
-  ['horizontal', [260, 116], { vertical: false }, { right: true, bottom: true }, null],
-  ['vertical', [372, 380], { vertical: true }, { right: true, bottom: true }, 2],
-  ['credits', [330, 300], { vertical: false }, { right: true, bottom: true }, 2],
-  ['error', [330, 260], { vertical: false }, { right: true, bottom: true }, 0,
+  ['hero', false, { svc: 'claude', index: 0 }],
+  ['horizontal', false, null],
+  ['vertical', true, { svc: 'codex', index: 0 }],
+  ['credits', false, { svc: 'codex', index: 0 }],
+  ['error', false, { svc: 'claude', index: -1 },
     { claude: { ok: false, error: 'login หมดอายุ (400) — เปิด terminal พิมพ์ claude แล้ว /login' } }],
 ];
 
-const EXTRA_CSS = '.detail.show { animation: none !important; }';
-const MARGIN = 6; // css px of transparent space kept around the cropped content
+const hidden = (zoom) => new BrowserWindow({
+  width: 1200, height: 900, show: false, transparent: true, frame: false,
+  webPreferences: { preload: path.join(__dirname, 'screenshot-preload.js'), zoomFactor: zoom },
+});
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// One view of the app page (card or panel) with demo data, cropped to its element.
+async function capture(view, vertical, data, selected) {
+  const win = hidden(ZOOM);
+  await win.loadFile(path.join(__dirname, '..', 'src', 'index.html'), { query: { view } });
+  await win.webContents.insertCSS('.detail.show { animation: none !important; }');
+  const send = (name, payload) => win.webContents.send('demo', name, payload);
+  send('vertical', vertical);
+  send('quota', data);
+  send('selected', selected);
+  send('reveal');
+  await wait(300);
+  const r = await win.webContents.executeJavaScript(`(() => {
+    const r = document.querySelector('${view === 'panel' ? '.detail' : '.card'}').getBoundingClientRect();
+    return { x: r.left, y: r.top, w: r.width, h: r.height };
+  })()`);
+  const img = await win.webContents.capturePage({
+    x: Math.floor((r.x - PAD) * ZOOM),
+    y: Math.floor((r.y - PAD) * ZOOM),
+    width: Math.ceil((r.w + 2 * PAD) * ZOOM),
+    height: Math.ceil((r.h + 2 * PAD) * ZOOM),
+  });
+  win.destroy();
+  return img.toDataURL();
+}
+
+// Puts the card and its panel together the way the app places them in the bottom-right corner of a screen:
+// the panel above the card (horizontal) or to its left (vertical), sharing the edge that faces the corner.
+async function compose(card, panel, vertical) {
+  const html = `<body style="margin:0"><div id="shot" style="display:inline-flex; align-items:flex-end;
+    flex-direction:${vertical ? 'row-reverse' : 'column-reverse'}; gap:${(GAP - 2 * PAD) * ZOOM}px;
+    padding:${(MARGIN - PAD) * ZOOM}px">
+    ${[card, panel].filter(Boolean).map((src) => `<img src="${src}" style="display:block">`).join('')}</div></body>`;
+  const win = hidden(1);
+  await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+  const r = await win.webContents.executeJavaScript(`(() => {
+    const r = document.getElementById('shot').getBoundingClientRect();
+    return { width: Math.ceil(r.width), height: Math.ceil(r.height) };
+  })()`);
+  const img = await win.webContents.capturePage({ x: 0, y: 0, ...r });
+  win.destroy();
+  return img;
+}
 
 app.on('window-all-closed', () => {});
 app.whenReady().then(async () => {
   fs.mkdirSync(OUT, { recursive: true });
-  for (const [name, [w, h], layout, anchor, click, override] of SHOTS) {
-    const win = new BrowserWindow({
-      width: Math.round(w * ZOOM), height: Math.round(h * ZOOM), show: false,
-      transparent: true, frame: false, backgroundColor: '#00000000',
-      webPreferences: { preload: path.join(__dirname, 'screenshot-preload.js') },
-    });
-    await win.loadFile(path.join(__dirname, '..', 'src', 'index.html'));
-    win.webContents.setZoomFactor(ZOOM);
-    await win.webContents.insertCSS(EXTRA_CSS);
-    const send = (n, p) => win.webContents.send('demo', n, p);
-    send('anchor', anchor);
-    send('layout', layout);
-    send('quota', { ...demo, ...override });
-    await new Promise((r) => setTimeout(r, 300));
-    if (click !== null) {
-      await win.webContents.executeJavaScript(`(() => {
-        const r = document.querySelectorAll('.ring')[${click}];
-        r.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 1 }));
-        document.getElementById('card').dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1 }));
-      })()`);
-    }
-    await new Promise((r) => setTimeout(r, 300));
-    // Crop to the card plus the open panel (if any), with a small transparent margin.
-    const box = await win.webContents.executeJavaScript(`(() => {
-      const rs = [...document.querySelectorAll('.card, .detail.show')].map((e) => e.getBoundingClientRect());
-      const x = Math.min(...rs.map((r) => r.left)), y = Math.min(...rs.map((r) => r.top));
-      return { x, y, w: Math.max(...rs.map((r) => r.right)) - x, h: Math.max(...rs.map((r) => r.bottom)) - y };
-    })()`);
-    const img = await win.webContents.capturePage({
-      x: Math.max(0, Math.floor((box.x - MARGIN) * ZOOM)),
-      y: Math.max(0, Math.floor((box.y - MARGIN) * ZOOM)),
-      width: Math.ceil((box.w + 2 * MARGIN) * ZOOM),
-      height: Math.ceil((box.h + 2 * MARGIN) * ZOOM),
-    });
+  for (const [name, vertical, selected, override] of SHOTS) {
+    const data = { ...demo, ...override };
+    const card = await capture('card', vertical, data, selected);
+    const panel = selected && await capture('panel', vertical, data, selected);
+    const img = await compose(card, panel, vertical);
     fs.writeFileSync(path.join(OUT, `${name}.png`), img.toPNG());
     console.log('wrote', `docs/${name}.png`);
-    win.destroy();
   }
   app.quit();
 });
