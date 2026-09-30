@@ -28,6 +28,7 @@ let card = null;                       // { x, y } on screen
 let cardSize = { w: 192, h: 91 };
 let panelSize = { w: 0, h: 0 };
 let selected = null;                   // { svc, index } of the ring whose panel is open
+let focusPanelOnReveal = false;
 let anchor = { right: true, bottom: true };
 let dragFrom = null;
 
@@ -102,7 +103,7 @@ function overlayWindow(view, bounds) {
     transparent: true,
     resizable: false,
     skipTaskbar: true,
-    focusable: false,
+    focusable: view === 'panel',
     hasShadow: false,
     alwaysOnTop: true,
     show: false,
@@ -116,7 +117,7 @@ function overlayWindow(view, bounds) {
     win.webContents.send('vertical', settings.vertical);
     if (last) win.webContents.send('quota', last);
   });
-  win.once('ready-to-show', () => win.showInactive());
+  if (view === 'card') win.once('ready-to-show', () => win.showInactive());
   return win;
 }
 
@@ -124,17 +125,22 @@ function createWindows() {
   card = initialCard();
   updateAnchor();
   cardWin = overlayWindow('card', around(card, cardSize));
-  // While no ring is open, the panel's window stays up but empty and click-through.
+  // Only the open detail panel takes focus, so clicking another window dismisses it.
   panelWin = overlayWindow('panel', around(card, { w: 0, h: 0 }));
   panelWin.setIgnoreMouseEvents(true);
+  panelWin.on('blur', () => { if (selected) select(null); });
 }
 
 // Opening a ring's panel: the panel page lays it out hidden and reports its size, the window is moved into place,
 // and only then is the panel revealed, so it never shows up at its old spot first (see 'size').
 function select(next) {
   selected = next;
+  focusPanelOnReveal = !!next;
   for (const win of windows()) win.webContents.send('selected', next);
-  if (!next) panelWin.setIgnoreMouseEvents(true);
+  if (!next) {
+    panelWin.setIgnoreMouseEvents(true);
+    panelWin.hide();
+  }
 }
 
 async function refresh() {
@@ -164,9 +170,10 @@ function snapshot(file) {
 
 function toggleVisible() {
   const show = !cardWin.isVisible();
-  for (const win of windows()) {
-    if (show) win.showInactive();
-    else win.hide();
+  if (show) cardWin.showInactive();
+  else {
+    select(null);
+    cardWin.hide();
   }
 }
 
@@ -188,6 +195,12 @@ function setOpacity(v) {
   settings.opacity = v;
   for (const win of windows()) win.setOpacity(v);
   saveSettings();
+}
+
+function restart() {
+  saveSettings();
+  app.relaunch();
+  app.quit();
 }
 
 function menu() {
@@ -212,6 +225,7 @@ function menu() {
     }]),
     { type: 'separator' },
     { label: cardWin.isVisible() ? 'Hide    Ctrl+Alt+Q' : 'Show    Ctrl+Alt+Q', click: toggleVisible },
+    { label: 'Restart', click: restart },
     { label: 'Quit', click: () => app.quit() },
   ]);
 }
@@ -219,7 +233,7 @@ function menu() {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on('second-instance', () => { for (const win of windows()) win?.showInactive(); });
+  app.on('second-instance', () => { cardWin?.showInactive(); });
 
   app.whenReady().then(() => {
     app.dock?.hide();
@@ -244,6 +258,11 @@ if (!app.requestSingleInstanceLock()) {
         panelWin.setBounds(around(panelPos(), panelSize));
         panelWin.setIgnoreMouseEvents(false);
         panelWin.webContents.send('reveal');
+        if (focusPanelOnReveal) {
+          focusPanelOnReveal = false;
+          panelWin.show();
+          panelWin.focus();
+        }
         return;
       }
       if (size.w === cardSize.w && size.h === cardSize.h) return;
