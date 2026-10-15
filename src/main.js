@@ -2,6 +2,7 @@ const { app, BrowserWindow, Tray, Menu, nativeImage, globalShortcut, ipcMain, sc
 const fs = require('node:fs');
 const path = require('node:path');
 const { fetchAll } = require('./quota');
+const I18N = require('./i18n');
 
 const POLL_MS = 3 * 60 * 1000;
 // Internet check: online when any of these answers within NET_TIMEOUT_MS. Any HTTP status counts, only a failed
@@ -17,20 +18,35 @@ const PAD = 2 * SCALE;
 const GAP = 4 * SCALE;
 // Run from source (`electron .`), a login item must also pass the app folder or it starts bare Electron.
 const LOGIN_ITEM = process.defaultApp ? { args: [app.getAppPath()] } : {};
+const SERVICES = [['claude', 'Claude'], ['codex', 'Codex'], ['cursor', 'Cursor']];
+const SERVICE_KEYS = SERVICES.map(([key]) => key);
+const LANG_KEYS = I18N.LANGS.map((l) => l.key);
 
 const settingsFile = () => path.join(app.getPath('userData'), 'settings.json');
 // card = where the card was left and its size then; null means "bottom-right of the primary display".
-let settings = { card: null, opacity: 0.92, vertical: false };
+// services = which are checked at all; hidden = quota windows (by id) left off the card; seen = the windows each
+// service had last time, so Settings can list them while a service is off.
+let settings = {
+  card: null,
+  opacity: 0.92,
+  vertical: false,
+  lang: 'en',
+  network: false,
+  services: { claude: true, codex: true, cursor: true },
+  hidden: { claude: [], codex: [], cursor: [] },
+  seen: {},
+};
 // The card and its detail panel get a window each, just big enough to hold them. A window takes the scale of the
 // display holding most of it, so a small one rescales as soon as the card is dragged onto another monitor, and
 // opening the panel never moves the card.
 let cardWin;
 let panelWin;
+let settingsWin = null;
 let tray;
 let timer;
-let netTimer;
+let netTimer = null;
 let last = null;
-let netState = null;                   // { online, ms } from the last internet check
+let netState = null;                   // { online, ms } from the last internet check; null while it's switched off
 let card = null;                       // { x, y } on screen
 let cardSize = { w: 192, h: 91 };
 let panelSize = { w: 0, h: 0 };
@@ -40,14 +56,42 @@ let anchor = { right: true, bottom: true };
 let dragFrom = null;
 
 function loadSettings() {
-  try { settings = { ...settings, ...JSON.parse(fs.readFileSync(settingsFile(), 'utf8')) }; } catch {}
+  let saved = {};
+  try { saved = JSON.parse(fs.readFileSync(settingsFile(), 'utf8')); } catch {}
+  settings = {
+    ...settings,
+    ...saved,
+    services: { ...settings.services, ...saved.services },
+    hidden: { ...settings.hidden, ...saved.hidden },
+    seen: { ...saved.seen },
+  };
+  if (!LANG_KEYS.includes(settings.lang)) settings.lang = 'en';
 }
 function saveSettings() {
   try { fs.writeFileSync(settingsFile(), JSON.stringify(settings)); } catch {}
 }
 
+const S = () => I18N.t(settings.lang);
+const canStartAtLogin = process.platform !== 'linux';
+const startAtLogin = () => canStartAtLogin && app.getLoginItemSettings(LOGIN_ITEM).openAtLogin;
+
+// What the pages get to see of the settings.
+const publicSettings = () => ({
+  lang: settings.lang,
+  vertical: settings.vertical,
+  opacity: settings.opacity,
+  network: settings.network,
+  services: settings.services,
+  hidden: settings.hidden,
+  seen: settings.seen,
+  startup: startAtLogin(),
+  canStartAtLogin,
+  version: app.getVersion(),
+});
+
 const trayIcon = () => nativeImage.createFromPath(path.join(__dirname, 'icon.png')).resize({ width: 16, height: 16 });
-const windows = () => [cardWin, panelWin];
+const windows = () => [cardWin, panelWin, settingsWin].filter((w) => w && !w.isDestroyed());
+const broadcast = (channel, value) => { for (const win of windows()) win.webContents.send(channel, value); };
 
 function defaultCard() {
   const area = screen.getPrimaryDisplay().workArea;
@@ -103,6 +147,12 @@ function layout() {
   if (selected) panelWin.setBounds(around(panelPos(), panelSize));
 }
 
+function sendState(win) {
+  win.webContents.send('settings', publicSettings());
+  if (netState) win.webContents.send('network', netState);
+  if (last) win.webContents.send('quota', last);
+}
+
 function overlayWindow(view, bounds) {
   const win = new BrowserWindow({
     ...bounds,
@@ -120,11 +170,7 @@ function overlayWindow(view, bounds) {
   win.setOpacity(settings.opacity);
   if (process.platform === 'darwin') win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   win.loadFile(path.join(__dirname, 'index.html'), { query: { view } });
-  win.webContents.on('did-finish-load', () => {
-    win.webContents.send('vertical', settings.vertical);
-    if (netState) win.webContents.send('network', netState);
-    if (last) win.webContents.send('quota', last);
-  });
+  win.webContents.on('did-finish-load', () => sendState(win));
   if (view === 'card') win.once('ready-to-show', () => win.showInactive());
   return win;
 }
@@ -139,27 +185,95 @@ function createWindows() {
   panelWin.on('blur', () => { if (selected) select(null); });
 }
 
+// A normal window of its own, centred on the display the card is on.
+function openSettings() {
+  select(null);
+  if (settingsWin && !settingsWin.isDestroyed()) {
+    if (settingsWin.isMinimized()) settingsWin.restore();
+    settingsWin.show();
+    settingsWin.focus();
+    return;
+  }
+  const width = 440;
+  const height = 680;
+  const area = screen.getDisplayNearestPoint({ x: Math.round(card.x), y: Math.round(card.y) }).workArea;
+  settingsWin = new BrowserWindow({
+    width,
+    height: Math.min(height, area.height - 2 * MARGIN),
+    x: Math.round(area.x + (area.width - width) / 2),
+    y: Math.round(area.y + (area.height - Math.min(height, area.height - 2 * MARGIN)) / 2),
+    minWidth: 380,
+    minHeight: 420,
+    frame: false,
+    maximizable: false,
+    fullscreenable: false,
+    backgroundColor: '#111318',
+    title: `Ai Quota Overlay — ${S().s.title}`,
+    icon: path.join(__dirname, 'icon.png'),
+    show: false,
+    webPreferences: { preload: path.join(__dirname, 'preload.js') },
+  });
+  settingsWin.removeMenu();
+  settingsWin.loadFile(path.join(__dirname, 'settings.html'));
+  settingsWin.webContents.on('did-finish-load', () => sendState(settingsWin));
+  settingsWin.once('ready-to-show', () => settingsWin.show());
+  settingsWin.on('closed', () => { settingsWin = null; });
+}
+
 // Opening a ring's panel: the panel page lays it out hidden and reports its size, the window is moved into place,
 // and only then is the panel revealed, so it never shows up at its old spot first (see 'size').
 function select(next) {
   selected = next;
   focusPanelOnReveal = !!next;
-  for (const win of windows()) win.webContents.send('selected', next);
+  for (const win of [cardWin, panelWin]) win.webContents.send('selected', next);
   if (!next) {
     panelWin.setIgnoreMouseEvents(true);
     panelWin.hide();
   }
 }
 
+// Remember each service's windows, so Settings can still list them while it's switched off or offline.
+function rememberWindows() {
+  let changed = false;
+  for (const key of SERVICE_KEYS) {
+    const r = last[key];
+    if (!r?.ok || !r.windows.length) continue;
+    const seen = r.windows.map(({ id, span, name, tag, billing }) => ({ id, span, name, tag, billing }));
+    if (JSON.stringify(seen) === JSON.stringify(settings.seen[key])) continue;
+    settings.seen[key] = seen;
+    changed = true;
+  }
+  if (changed) {
+    saveSettings();
+    broadcast('settings', publicSettings());
+  }
+}
+
 async function refresh() {
   cardWin.webContents.send('loading');
-  last = await fetchAll();
-  for (const win of windows()) win.webContents.send('quota', last);
+  last = await fetchAll(settings.services);
+  rememberWindows();
+  broadcast('quota', last);
   if (process.env.QUOTA_OVERLAY_SNAPSHOT) snapshot(process.env.QUOTA_OVERLAY_SNAPSHOT);
-  const lines = [['Claude', last.claude], ['Codex', last.codex], ['Cursor', last.cursor]]
-    .filter(([, r]) => !r.absent)
-    .map(([name, r]) => tipLine(name, r));
-  tray.setToolTip((lines.join('\n') || 'Not logged in to Claude / Codex / Cursor').slice(0, 127));
+  updateTooltip();
+}
+
+function updateTooltip() {
+  if (!tray) return;
+  if (!last) return tray.setToolTip('Ai Quota Overlay');
+  const lines = SERVICES
+    .filter(([key]) => last[key] && !last[key].absent)
+    .map(([key, name]) => tipLine(key, name, last[key]));
+  tray.setToolTip((lines.join('\n') || S().menu.notLoggedIn).slice(0, 127));
+}
+
+function tipLine(key, name, r) {
+  if (!r.ok) return `${name}: ${I18N.errorText(r.error, settings.lang)}`;
+  const hidden = settings.hidden[key] ?? [];
+  return `${name} ` + r.windows
+    .filter((w) => !hidden.includes(w.id))
+    .map((w) => `${I18N.windowLabel(w, settings.lang, true)} ${Math.round(100 - w.usedPercent)}%`)
+    .join(' · ');
 }
 
 // ms is the fastest answer. Coming back online refetches the quota, which failed while offline.
@@ -171,15 +285,24 @@ async function checkNetwork() {
       net.fetch(url, { method: 'HEAD', cache: 'no-store', signal: AbortSignal.timeout(NET_TIMEOUT_MS) })));
     online = true;
   } catch {}
+  if (!settings.network) return; // switched off while the check was out
   const wasOffline = netState && !netState.online;
   netState = { online, ms: online ? Date.now() - start : null };
-  cardWin.webContents.send('network', netState);
+  broadcast('network', netState);
   if (online && wasOffline) refresh();
 }
 
-function tipLine(name, r) {
-  if (!r.ok) return `${name}: ${r.error}`;
-  return `${name} ` + r.windows.map((w) => `${w.label} ${Math.round(100 - w.usedPercent)}%`).join(' · ');
+// The internet check only runs while it's shown on the card (Settings → Internet status, off by default).
+function applyNetwork() {
+  clearInterval(netTimer);
+  netTimer = null;
+  if (settings.network) {
+    checkNetwork();
+    netTimer = setInterval(checkNetwork, NET_MS);
+  } else {
+    netState = null;
+    broadcast('network', null);
+  }
 }
 
 // Debug aid: save a PNG of the card after the first fetch, then exit.
@@ -208,16 +331,52 @@ function resetPosition() {
   layout();
 }
 
-function toggleVertical() {
-  settings.vertical = !settings.vertical;
+// Every change, from the menus or the Settings window, goes through here and is pushed to all pages.
+function setSetting(key, value) {
+  switch (key) {
+    case 'lang':
+      if (!LANG_KEYS.includes(value)) return;
+      settings.lang = value;
+      settingsWin?.setTitle(`Ai Quota Overlay — ${S().s.title}`);
+      break;
+    case 'vertical':
+      settings.vertical = !!value;
+      select(null);
+      break;
+    case 'opacity': {
+      const v = Math.min(1, Math.max(0.3, Number(value) || 1));
+      settings.opacity = Math.round(v * 100) / 100;
+      for (const win of [cardWin, panelWin]) win.setOpacity(settings.opacity);
+      break;
+    }
+    case 'network':
+      settings.network = !!value;
+      applyNetwork();
+      break;
+    case 'startup':
+      if (canStartAtLogin) app.setLoginItemSettings({ ...LOGIN_ITEM, openAtLogin: !!value });
+      break;
+    case 'service': {
+      if (!SERVICE_KEYS.includes(value?.svc)) return;
+      settings.services = { ...settings.services, [value.svc]: !!value.on };
+      if (selected?.svc === value.svc) select(null);
+      refresh();
+      break;
+    }
+    case 'window': {
+      if (!SERVICE_KEYS.includes(value?.svc) || typeof value.id !== 'string') return;
+      const hidden = new Set(settings.hidden[value.svc] ?? []);
+      if (value.on) hidden.delete(value.id);
+      else hidden.add(value.id);
+      settings.hidden = { ...settings.hidden, [value.svc]: [...hidden] };
+      break;
+    }
+    default:
+      return;
+  }
   saveSettings();
-  cardWin.webContents.send('vertical', settings.vertical);
-}
-
-function setOpacity(v) {
-  settings.opacity = v;
-  for (const win of windows()) win.setOpacity(v);
-  saveSettings();
+  broadcast('settings', publicSettings());
+  updateTooltip();
 }
 
 function restart() {
@@ -227,29 +386,32 @@ function restart() {
 }
 
 function menu() {
+  const m = S().menu;
   const opacities = [1, 0.92, 0.8, 0.65, 0.5];
   return Menu.buildFromTemplate([
-    { label: 'Refresh', click: refresh },
-    { label: settings.vertical ? 'Rotate to horizontal' : 'Rotate to vertical', click: toggleVertical },
-    { label: 'Snap to corner', click: resetPosition },
+    { label: m.settings, click: openSettings },
+    { type: 'separator' },
+    { label: m.refresh, click: refresh },
+    { label: settings.vertical ? m.toHorizontal : m.toVertical, click: () => setSetting('vertical', !settings.vertical) },
+    { label: m.snap, click: resetPosition },
     { type: 'separator' },
     {
-      label: 'Opacity',
+      label: m.opacity,
       submenu: opacities.map((v) => ({
-        label: `${Math.round(v * 100)}%`, type: 'radio', checked: settings.opacity === v, click: () => setOpacity(v),
+        label: `${Math.round(v * 100)}%`, type: 'radio', checked: settings.opacity === v, click: () => setSetting('opacity', v),
       })),
     },
     // Login items are a Windows/macOS feature; on Linux use the desktop's autostart settings.
-    ...(process.platform === 'linux' ? [] : [{
-      label: 'Launch at startup',
+    ...(canStartAtLogin ? [{
+      label: m.startup,
       type: 'checkbox',
-      checked: app.getLoginItemSettings(LOGIN_ITEM).openAtLogin,
-      click: (item) => app.setLoginItemSettings({ ...LOGIN_ITEM, openAtLogin: item.checked }),
-    }]),
+      checked: startAtLogin(),
+      click: (item) => setSetting('startup', item.checked),
+    }] : []),
     { type: 'separator' },
-    { label: cardWin.isVisible() ? 'Hide    Ctrl+Alt+Q' : 'Show    Ctrl+Alt+Q', click: toggleVisible },
-    { label: 'Restart', click: restart },
-    { label: 'Quit', click: () => app.quit() },
+    { label: `${cardWin.isVisible() ? m.hide : m.show}    Ctrl+Alt+Q`, click: toggleVisible },
+    { label: m.restart, click: restart },
+    { label: m.quit, click: () => app.quit() },
   ]);
 }
 
@@ -288,6 +450,7 @@ if (!app.requestSingleInstanceLock()) {
         }
         return;
       }
+      if (e.sender !== cardWin.webContents) return;
       if (size.w === cardSize.w && size.h === cardSize.h) return;
       // New data or rotation: keep the anchored corner where it is.
       if (anchor.right) card.x += cardSize.w - size.w;
@@ -298,6 +461,9 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.on('select', (_e, next) => select(next));
     ipcMain.on('refresh', refresh);
     ipcMain.on('menu', () => menu().popup({ window: cardWin }));
+    ipcMain.on('open-settings', openSettings);
+    ipcMain.on('set', (_e, { key, value } = {}) => setSetting(key, value));
+    ipcMain.on('snap', resetPosition);
     // Drag is measured from the real cursor position, so page zoom and DPI don't skew it.
     ipcMain.on('drag-start', () => { dragFrom = { card: { ...card }, cursor: screen.getCursorScreenPoint() }; });
     ipcMain.on('drag-move', () => {
@@ -316,8 +482,8 @@ if (!app.requestSingleInstanceLock()) {
 
     refresh();
     timer = setInterval(refresh, POLL_MS);
-    checkNetwork();
-    netTimer = setInterval(checkNetwork, NET_MS);
+    applyNetwork();
+    if (process.env.QUOTA_OVERLAY_SETTINGS) openSettings();
   });
 
   app.on('will-quit', () => {
@@ -325,5 +491,6 @@ if (!app.requestSingleInstanceLock()) {
     clearInterval(netTimer);
     globalShortcut.unregisterAll();
   });
+  // The settings window can close on its own; the overlay windows only go away with the app.
   app.on('window-all-closed', () => app.quit());
 }

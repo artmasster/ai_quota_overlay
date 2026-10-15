@@ -9,8 +9,10 @@ const ignore = () => {};
 contextBridge.exposeInMainWorld('overlay', {
   onQuota: on('quota'),
   onLoading: on('loading'),
-  onVertical: on('vertical'),
+  onNetwork: on('network'),
+  onSettings: on('settings'),
   onSelected: on('selected'),
   onReveal: on('reveal'),
-  size: ignore, select: ignore, refresh: ignore, menu: ignore, dragStart: ignore, dragMove: ignore, dragEnd: ignore,
+  size: ignore, select: ignore, refresh: ignore, menu: ignore, openSettings: ignore, set: ignore, snap: ignore,
+  dragStart: ignore, dragMove: ignore, dragEnd: ignore,
 });
