@@ -6,6 +6,7 @@ const send = (channel) => (value) => ipcRenderer.send(channel, value);
 contextBridge.exposeInMainWorld('overlay', {
   onQuota: on('quota'),
   onLoading: on('loading'),
+  onNetwork: on('network'),
   onVertical: on('vertical'),
   onSelected: on('selected'),
   onReveal: on('reveal'),

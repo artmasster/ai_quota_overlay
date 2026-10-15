@@ -63,6 +63,23 @@
   .ring text { font-weight: 700; font-size: 10.5px; fill: var(--text); font-variant-numeric: tabular-nums; }
   .lbl { color: var(--muted); font-size: 9.5px; margin-top: 1px; }
   .empty { color: var(--muted); padding: 2px 4px; }
+  .net + .empty { margin-left: 10px; border-left: 1px solid var(--line); padding-left: 10px; }
+
+  /* Internet status: a solid round light, green with the ping when online, flashing red when offline. */
+  .net .name { color: var(--ok); }
+  .net-light { padding: 2px 2px 1px; display: flex; flex-direction: column; align-items: center; }
+  .net-dot {
+    width: 36px; height: 36px; border-radius: 50%;
+    display: grid; place-items: center;
+    color: #0b1a10; background: var(--ok);
+    box-shadow: 0 0 10px color-mix(in srgb, var(--ok) 55%, transparent);
+  }
+  .net.off .name, .net.off .lbl { color: var(--bad); font-weight: 700; }
+  .net.off .net-dot { color: #fff; background: var(--bad); animation: alarm 1s ease-in-out infinite; }
+  @keyframes alarm {
+    50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--bad) 35%, transparent), 0 0 16px var(--bad); opacity: .75; }
+  }
+  body.offline .card, body.offline .card:hover { border-color: var(--bad); }
 
   /* ---------- detail panel ---------- */
   .detail {
@@ -127,7 +144,11 @@
   const ICON_CLOCK = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="8" cy="8" r="6.3"/><path d="M8 4.6V8l2.3 1.5"/></svg>';
   const ICON_COIN = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><ellipse cx="8" cy="5" rx="5.5" ry="2.3"/><path d="M2.5 5v6c0 1.3 2.5 2.3 5.5 2.3s5.5-1 5.5-2.3V5M2.5 8c0 1.3 2.5 2.3 5.5 2.3s5.5-1 5.5-2.3"/></svg>';
 
+  const ICON_WIFI = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M2.5 9a14 14 0 0 1 19 0M6 12.8a9 9 0 0 1 12 0M9.3 16.4a4.4 4.4 0 0 1 5.4 0"/><circle cx="12" cy="19.6" r="1.4" fill="currentColor" stroke="none"/></svg>';
+  const ICON_WIFI_OFF = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M2.5 9a14 14 0 0 1 19 0M6 12.8a9 9 0 0 1 12 0M9.3 16.4a4.4 4.4 0 0 1 5.4 0M3 3l18 18"/><circle cx="12" cy="19.6" r="1.4" fill="currentColor" stroke="none"/></svg>';
+
   let data = null;
+  let network = null; // { online, ms }
   let selected = null; // { svc, index }
 
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -176,11 +197,24 @@
   }
 
   // ---------- compact card ----------
+  function netHtml() {
+    if (!network) return '';
+    const { online, ms } = network;
+    return `<div class="svc net ${online ? 'on' : 'off'}" title="${online ? 'เชื่อมต่ออินเทอร์เน็ตได้' : 'เชื่อมต่ออินเทอร์เน็ตไม่ได้'}">
+      <span class="name">เน็ต</span>
+      <div class="net-light"><div class="net-dot">${online ? ICON_WIFI : ICON_WIFI_OFF}</div>
+        <span class="lbl">${online ? `${ms} ms` : 'ออฟไลน์'}</span></div></div>`;
+  }
+
   function renderCard() {
+    if (!data) {
+      root.innerHTML = netHtml() + '<span class="empty">…</span>';
+      return;
+    }
     const shown = SERVICES.filter((s) => data[s.key] && !data[s.key].absent);
     if (selected && !shown.some((s) => s.key === selected.svc)) window.overlay.select(null);
     if (!shown.length) {
-      root.innerHTML = '<span class="empty">Not logged in to Claude, Codex or Cursor</span>';
+      root.innerHTML = netHtml() + '<span class="empty">Not logged in to Claude, Codex or Cursor</span>';
       return;
     }
     const ring = (s, index, left, label, text) => {
@@ -188,7 +222,7 @@
       return `<div class="ring${sel}" style="--accent:${s.color}" data-svc="${s.key}" data-index="${index}">
         ${ringSvg(36, 4, left, text ?? Math.round(left))}<span class="lbl">${esc(label)}</span></div>`;
     };
-    root.innerHTML = shown.map((s) => {
+    root.innerHTML = netHtml() + shown.map((s) => {
       const r = data[s.key];
       const rings = !r.ok ? ring(s, -1, 0, 'error', '!')
         : r.windows.length ? r.windows.map((w, i) => ring(s, i, 100 - w.usedPercent, leftLabel(w))).join('')
@@ -239,9 +273,8 @@
   }
 
   function render() {
-    if (!data) return;
     if (view === 'card') renderCard();
-    else renderDetail();
+    else if (data) renderDetail();
   }
 
   // Main fits this page's window around its element.
@@ -275,6 +308,11 @@
     root.addEventListener('click', (e) => { if (e.target.closest('.d-close')) window.overlay.select(null); });
   } else {
     window.overlay.onLoading(() => document.body.classList.add('loading'));
+    window.overlay.onNetwork((n) => {
+      network = n;
+      document.body.classList.toggle('offline', !n.online);
+      render();
+    });
     window.overlay.onVertical((v) => document.body.classList.toggle('vertical', v));
 
     // Drag to move, click a ring to open its details, click elsewhere on the card to close them.

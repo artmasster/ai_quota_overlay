@@ -1,9 +1,14 @@
-const { app, BrowserWindow, Tray, Menu, nativeImage, globalShortcut, ipcMain, screen } = require('electron');
+const { app, BrowserWindow, Tray, Menu, nativeImage, globalShortcut, ipcMain, screen, net } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const { fetchAll } = require('./quota');
 
 const POLL_MS = 3 * 60 * 1000;
+// Internet check: online when any of these answers within NET_TIMEOUT_MS. Any HTTP status counts, only a failed
+// connection doesn't, so a captive portal or a blocked host still reads as online as long as one gets through.
+const NET_MS = 5 * 1000;
+const NET_TIMEOUT_MS = 4 * 1000;
+const NET_URLS = ['https://www.gstatic.com/generate_204', 'https://1.1.1.1/cdn-cgi/trace'];
 const MARGIN = 16;
 // Whole UI is drawn at this zoom. Sizes from the page are CSS px, multiplied by SCALE for the windows.
 const SCALE = 1.2;
@@ -23,7 +28,9 @@ let cardWin;
 let panelWin;
 let tray;
 let timer;
+let netTimer;
 let last = null;
+let netState = null;                   // { online, ms } from the last internet check
 let card = null;                       // { x, y } on screen
 let cardSize = { w: 192, h: 91 };
 let panelSize = { w: 0, h: 0 };
@@ -115,6 +122,7 @@ function overlayWindow(view, bounds) {
   win.loadFile(path.join(__dirname, 'index.html'), { query: { view } });
   win.webContents.on('did-finish-load', () => {
     win.webContents.send('vertical', settings.vertical);
+    if (netState) win.webContents.send('network', netState);
     if (last) win.webContents.send('quota', last);
   });
   if (view === 'card') win.once('ready-to-show', () => win.showInactive());
@@ -152,6 +160,21 @@ async function refresh() {
     .filter(([, r]) => !r.absent)
     .map(([name, r]) => tipLine(name, r));
   tray.setToolTip((lines.join('\n') || 'Not logged in to Claude / Codex / Cursor').slice(0, 127));
+}
+
+// ms is the fastest answer. Coming back online refetches the quota, which failed while offline.
+async function checkNetwork() {
+  const start = Date.now();
+  let online = false;
+  try {
+    await Promise.any(NET_URLS.map((url) =>
+      net.fetch(url, { method: 'HEAD', cache: 'no-store', signal: AbortSignal.timeout(NET_TIMEOUT_MS) })));
+    online = true;
+  } catch {}
+  const wasOffline = netState && !netState.online;
+  netState = { online, ms: online ? Date.now() - start : null };
+  cardWin.webContents.send('network', netState);
+  if (online && wasOffline) refresh();
 }
 
 function tipLine(name, r) {
@@ -293,10 +316,13 @@ if (!app.requestSingleInstanceLock()) {
 
     refresh();
     timer = setInterval(refresh, POLL_MS);
+    checkNetwork();
+    netTimer = setInterval(checkNetwork, NET_MS);
   });
 
   app.on('will-quit', () => {
     clearInterval(timer);
+    clearInterval(netTimer);
     globalShortcut.unregisterAll();
   });
   app.on('window-all-closed', () => app.quit());
