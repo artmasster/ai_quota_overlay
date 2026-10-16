@@ -1,0 +1,54 @@
+[package]
+name = "ai-quota-overlay"
+version = "2.0.0"
+edition = "2021"
+description = "Tiny always-on-top rings showing how much Claude, Codex and Cursor quota you have left"
+license = "MIT"
+repository = "https://github.com/artmasster/ai_quota_overlay"
+publish = false
+
+[[bin]]
+name = "ai-quota-overlay"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd", "png-format"] }
+cosmic-text = { version = "0.14", default-features = false, features = ["std", "swash"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+base64 = "0.22"
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+ureq = { version = "3", default-features = false, features = ["native-tls", "gzip"] }
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Power",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_System_Com",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+ureq = { version = "3", default-features = false, features = ["native-tls", "gzip"] }
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev.package."*"]
+opt-level = 2
