@@ -92,8 +92,22 @@ enum Sw {
     Svc(usize),
 }
 
+impl Sw {
+    fn hit(self) -> Hit {
+        match self {
+            Sw::Visible => Hit::Visible,
+            Sw::Startup => Hit::Startup,
+            Sw::Network => Hit::Network,
+            Sw::Svc(i) => Hit::Service(SERVICES[i]),
+        }
+    }
+}
+
 pub struct AppWin {
+    /// Everything needs painting again.
     pub dirty: bool,
+    /// Only this part (DIP) changed: a hover fade, a switch knob, the slider, a spinner, the ping.
+    pub damage: Option<R>,
     pub refresh_spin: bool,
     scroll: f32,
     content_h: f32,
@@ -112,6 +126,12 @@ pub struct AppWin {
     t0: Instant,
     spin_from: Option<Instant>,
     last_w: f32,
+    /// Hit boxes by key from the last paint, to know what a hover or a switch covers.
+    rects: HashMap<u64, R>,
+    /// Where the spinning icons, the opacity slider and the internet status row were painted.
+    spin_rects: Vec<R>,
+    slider_rect: R,
+    net_rect: R,
 }
 
 fn hkey(h: &Hit) -> u64 {
@@ -142,6 +162,11 @@ impl AppWin {
             t0: Instant::now(),
             spin_from: None,
             last_w: 0.0,
+            damage: None,
+            rects: HashMap::new(),
+            spin_rects: Vec::new(),
+            slider_rect: R::default(),
+            net_rect: R::default(),
         }
     }
 
@@ -163,21 +188,57 @@ impl AppWin {
 
     /// Advances animations; true while anything moves.
     pub fn step(&mut self, dt: f32) -> bool {
+        let fading = self.hovers.moving();
         let mut moving = self.hovers.step(dt);
-        for (v, t) in self.switches.values_mut() {
+        for k in fading {
+            self.damage_key(k);
+        }
+        let mut knobs = Vec::new();
+        for (k, (v, t)) in self.switches.iter_mut() {
             if v != t {
                 let d = dt / 0.18;
                 *v = if *v < *t { (*v + d).min(*t) } else { (*v - d).max(*t) };
-                moving = true;
+                knobs.push(*k);
             }
+        }
+        for k in knobs {
+            moving = true;
+            self.damage_key(hkey(&k.hit()));
         }
         if self.refresh_spin || self.spin_from.is_some() {
             moving = true;
-        }
-        if moving {
-            self.dirty = true;
+            for r in self.spin_rects.clone() {
+                self.damage(r.grow(2.0));
+            }
         }
         moving
+    }
+
+    /// Marks part of the window (DIP) for repainting.
+    pub fn damage(&mut self, r: R) {
+        self.damage = Some(self.damage.map_or(r, |d| d.union(r)));
+    }
+
+    fn damage_key(&mut self, k: u64) {
+        // A little extra for shadows, glows and a pressed button's 1 px shift.
+        if let Some(r) = self.rects.get(&k).copied() {
+            self.damage(r.grow(6.0));
+        }
+    }
+
+    fn damage_hit(&mut self, h: &Option<Hit>) {
+        if let Some(h) = h {
+            self.damage_key(hkey(h));
+        }
+    }
+
+    /// The internet status row (its ping changes every few seconds).
+    pub fn damage_net(&mut self) {
+        if self.net_rect.w > 0.0 {
+            self.damage(self.net_rect.grow(2.0));
+        } else {
+            self.dirty = true;
+        }
     }
 
     fn switch_pos(&mut self, k: Sw, on: bool) -> f32 {
@@ -201,7 +262,7 @@ impl AppWin {
             Mouse::Move => {
                 if self.slider_drag {
                     out.push(Action::Opacity(self.slider_at(x)));
-                    self.dirty = true;
+                    self.damage(self.slider_rect);
                     return out;
                 }
                 if let Some((y0, s0)) = self.thumb_drag {
@@ -212,17 +273,18 @@ impl AppWin {
                 }
                 let h = self.hit_at(x, y);
                 if h != self.hover {
-                    self.hover = h.clone();
+                    let old = std::mem::replace(&mut self.hover, h.clone());
                     let on: Vec<u64> = h.iter().map(hkey).collect();
                     self.hovers.target(&on);
-                    self.dirty = true;
+                    self.damage_hit(&old);
+                    self.damage_hit(&h);
                 }
             }
             Mouse::Leave => {
                 if !self.slider_drag && self.thumb_drag.is_none() {
-                    self.hover = None;
+                    let old = self.hover.take();
                     self.hovers.target(&[]);
-                    self.dirty = true;
+                    self.damage_hit(&old);
                 }
             }
             Mouse::Down(Btn3::Left) => {
@@ -237,7 +299,10 @@ impl AppWin {
                     Some(Hit::Thumb) => self.thumb_drag = Some((y, self.scroll)),
                     _ => {}
                 }
-                self.dirty = true;
+                self.damage_hit(&h);
+                if self.slider_drag {
+                    self.damage(self.slider_rect);
+                }
             }
             Mouse::Up(Btn3::Left) => {
                 let was_slider = self.slider_drag;
@@ -246,7 +311,11 @@ impl AppWin {
                 self.thumb_drag = None;
                 let pressed = self.pressed.take();
                 let h = self.hit_at(x, y);
-                self.dirty = true;
+                self.damage_hit(&pressed);
+                self.damage_hit(&h);
+                if was_slider {
+                    self.damage(self.slider_rect);
+                }
                 if was_slider || h.is_none() || h != pressed {
                     return out;
                 }
@@ -317,6 +386,7 @@ impl AppWin {
         }
         self.view_h = h - TITLE_H;
         self.hits.clear();
+        self.spin_rects.clear();
         c.pm.fill(BG.sk());
         let content_h = self.draw_main(c, f, ctx, w);
         self.content_h = content_h;
@@ -330,6 +400,7 @@ impl AppWin {
         }
         self.draw_scrollbar(c, w, h);
         self.draw_titlebar(c, f, ctx, w);
+        self.rects = self.hits.iter().map(|(r, h)| (hkey(h), *r)).collect();
         if self.refresh_spin && self.spin_from.is_none() {
             self.spin_from = Some(Instant::now());
         }
@@ -455,6 +526,7 @@ impl AppWin {
         let net_on = ctx.settings.network;
         let pos = self.switch_pos(Sw::Network, net_on);
         let net = ctx.net;
+        let net_y = y;
         y += self.row(c, f, x0, y, cw, &icons::WIFI_ROW, s.s.network_show, Some(s.s.network_hint), &mut |me, c, f, right, mid| {
             me.switch(c, right - 38.0, mid, pos, net_on, ACCENT, Hit::Network);
             let mut used = 38.0;
@@ -474,6 +546,7 @@ impl AppWin {
             }
             (used, 22.0)
         });
+        self.net_rect = R::new(x0, net_y, cw, y - net_y);
         y += 1.0;
         self.group_frame(c, x0, gy, cw, y - gy, &[]);
 
@@ -521,7 +594,11 @@ impl AppWin {
             (&icons::QUIT, s.s.quit, Hit::Quit, true, 0.0),
         ];
         for (i, (icon, text, hit, danger, rot)) in buttons.into_iter().enumerate() {
-            self.button(c, f, x0 + i as f32 * (bw + 8.0), y, bw, icon, text, hit, danger, rot);
+            let bx = x0 + i as f32 * (bw + 8.0);
+            if hit == Hit::Refresh && self.refresh_spin {
+                self.spin_rects.push(R::new(bx, y, bw, bh));
+            }
+            self.button(c, f, bx, y, bw, icon, text, hit, danger, rot);
         }
         let left_end = y + bh;
         let right_end = y;
@@ -687,6 +764,8 @@ impl AppWin {
         let ow = 38.0;
         let track = R::new(right - ow - 10.0 - 140.0, mid - 3.0, 140.0, 6.0);
         self.slider_track = track;
+        // The thumb's glow reaches past the track ends; the value text sits at the right.
+        self.slider_rect = R::new(track.x - 14.0, mid - 16.0, right - track.x + 16.0, 32.0);
         let v = (value * 100.0).round().clamp(50.0, 100.0) as f32;
         let p = (v - 50.0) / 50.0;
         // linear-gradient(90deg, accent p, track p): a hard stop.
@@ -957,6 +1036,7 @@ impl AppWin {
         let rot = if spin { (self.t0.elapsed().as_secs_f32() % 1.0) * 360.0 } else { 0.0 };
         if spin {
             self.spin_from.get_or_insert(Instant::now());
+            self.spin_rects.push(icon_r);
         }
         icons::UPDATE.draw_rot(c, icon_r.cx() - 8.0, icon_r.cy() - 8.0, 16.0, 16.0, if fresh { Rgba::WHITE } else { MUTED }, rot);
         let tx = x + 14.0 + 30.0 + 14.0;

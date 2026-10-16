@@ -88,6 +88,11 @@ impl R {
     pub fn grow(&self, d: f32) -> Self {
         Self::new(self.x - d, self.y - d, self.w + 2.0 * d, self.h + 2.0 * d)
     }
+    /// The smallest box holding both.
+    pub fn union(&self, o: R) -> Self {
+        let (x, y) = (self.x.min(o.x), self.y.min(o.y));
+        Self::new(x, y, self.right().max(o.right()) - x, self.bottom().max(o.bottom()) - y)
+    }
 }
 
 /// Paint for a fill: a colour or a CSS `linear-gradient(<deg>, stops…)` over the filled box.

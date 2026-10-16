@@ -22,6 +22,11 @@ impl<K: Copy + Eq + Hash> Fades<K> {
         }
     }
 
+    /// Keys whose value is still on its way to the target.
+    pub fn moving(&self) -> Vec<K> {
+        self.cur.iter().filter(|(_, (v, t))| v != t).map(|(k, _)| *k).collect()
+    }
+
     /// Advances by `dt` seconds; true while anything is still moving.
     pub fn step(&mut self, dt: f32) -> bool {
         let d = if self.secs <= 0.0 { 1.0 } else { dt / self.secs };

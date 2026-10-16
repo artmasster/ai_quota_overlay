@@ -7,7 +7,7 @@ use cosmic_text::{
     Weight, Wrap,
 };
 use std::collections::HashMap;
-use tiny_skia::{IntSize, Mask, Paint, Pixmap, Transform};
+use tiny_skia::Pixmap;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Fam {
@@ -174,6 +174,10 @@ impl Fonts {
         let base_off = self.baseline(st);
         // Text is only ever drawn under scale + translate transforms.
         let (scale, tx, ty) = (c.base.sx, c.base.tx, c.base.ty);
+        // Whole device px of the translation are added after placement, so a canvas moved by whole px (a partial
+        // repaint) rasterises every glyph exactly as the full one does.
+        let (ix, iy) = (tx.floor(), ty.floor());
+        let (tx, ty) = (tx - ix, ty - iy);
         let lh = st.lh;
         // Collect glyphs first (the buffer borrows self).
         let mut glyphs: Vec<(CacheKey, i32, i32)> = Vec::new();
@@ -195,15 +199,15 @@ impl Fonts {
                 let offset = (tx + scale * (x + ax), (ty + scale * line_base).round());
                 for g in run.glyphs.iter() {
                     let pg = g.physical(offset, scale);
-                    glyphs.push((pg.cache_key, pg.x, pg.y));
+                    glyphs.push((pg.cache_key, pg.x + ix as i32, pg.y + iy as i32));
                 }
             }
         }
         let color = st.color;
         let (cw, ch) = (c.pm.width() as i32, c.pm.height() as i32);
         for (key, gx, gy) in glyphs {
-            // Off the canvas (layout dry runs draw far outside it): nothing to rasterise.
-            if gy < -200 || gy > ch + 200 || gx > cw + 200 {
+            // Off the canvas (layout dry runs and partial repaints draw far outside it): nothing to rasterise.
+            if gy < -200 || gy > ch + 200 || gx < -200 || gx > cw + 200 {
                 continue;
             }
             let Some(img) = self.cache.get_image(&mut self.fs, key).as_ref() else { continue };
@@ -238,24 +242,51 @@ impl Fonts {
     }
 }
 
+/// Paints a glyph's coverage in `color` (source-over), clipped to the pixmap.
 fn blit_glyph(pm: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, data: &[u8], content: SwashContent, color: Rgba) {
-    match content {
-        SwashContent::Mask => {
-            let Some(size) = IntSize::from_wh(w, h) else { return };
-            let Some(mask) = Mask::from_vec(data.to_vec(), size) else { return };
-            // Fill the glyph box through the coverage mask.
-            let Some(mut tmp) = Pixmap::new(w, h) else { return };
-            let mut p = Paint::default();
-            p.set_color(color.sk());
-            tmp.fill_rect(tiny_skia::Rect::from_xywh(0.0, 0.0, w as f32, h as f32).unwrap(), &p, Transform::identity(), Some(&mask));
-            pm.draw_pixmap(x, y, tmp.as_ref(), &tiny_skia::PixmapPaint::default(), Transform::identity(), None);
-        }
-        SwashContent::Color | SwashContent::SubpixelMask => {
-            // Colour glyphs (emoji) are not used by the UI; draw their alpha as a mask.
-            let alpha: Vec<u8> = data.chunks(4).map(|p| p[3]).collect();
-            blit_glyph(pm, x, y, w, h, &alpha, SwashContent::Mask, color);
+    let (gw, gh) = (w as i32, h as i32);
+    let stride = match content {
+        SwashContent::Mask => 1,
+        // Colour glyphs (emoji) are not used by the UI; their alpha is drawn as a mask.
+        SwashContent::Color | SwashContent::SubpixelMask => 4,
+    };
+    if data.len() < (w * h) as usize * stride {
+        return;
+    }
+    let (pw, ph) = (pm.width() as i32, pm.height() as i32);
+    let (x0, y0) = (x.max(0), y.max(0));
+    let (x1, y1) = ((x + gw).min(pw), (y + gh).min(ph));
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    let c = color.sk().premultiply().to_color_u8();
+    let (cr, cg, cb, ca) = (c.red() as u32, c.green() as u32, c.blue() as u32, c.alpha() as u32);
+    let px = pm.data_mut();
+    for yy in y0..y1 {
+        let src = ((yy - y) * gw) as usize;
+        let row = (yy * pw) as usize * 4;
+        for xx in x0..x1 {
+            let i = src + (xx - x) as usize;
+            let cov = data[i * stride + stride - 1] as u32;
+            if cov == 0 {
+                continue;
+            }
+            let sa = div255(ca * cov);
+            if sa == 0 {
+                continue;
+            }
+            let inv = 255 - sa;
+            let d = &mut px[row + xx as usize * 4..row + xx as usize * 4 + 4];
+            d[0] = (div255(cr * cov) + div255(d[0] as u32 * inv)).min(255) as u8;
+            d[1] = (div255(cg * cov) + div255(d[1] as u32 * inv)).min(255) as u8;
+            d[2] = (div255(cb * cov) + div255(d[2] as u32 * inv)).min(255) as u8;
+            d[3] = (sa + div255(d[3] as u32 * inv)).min(255) as u8;
         }
     }
+}
+
+fn div255(v: u32) -> u32 {
+    ((v + 128) * 257) >> 16
 }
 
 fn family_metrics(fs: &mut FontSystem, family: &str) -> (f32, f32) {

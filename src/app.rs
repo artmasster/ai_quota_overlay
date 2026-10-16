@@ -159,6 +159,11 @@ pub trait Host {
     /// Client size in DIP and device px per DIP of the open app window.
     fn app_size(&self) -> Option<(f64, f64, f64)>;
     fn app_present(&mut self, pm: &Pixmap);
+    /// Shows `pm` again where only the device px box (x, y, w, h) changed since the last present.
+    fn app_present_rect(&mut self, pm: &Pixmap, r: (u32, u32, u32, u32)) {
+        let _ = r;
+        self.app_present(pm);
+    }
     fn app_title(&mut self, title: &str);
     /// Starts moving the app window with the mouse (from the custom title bar).
     fn app_drag(&mut self);
@@ -244,6 +249,12 @@ pub struct App {
     dirty_toast: bool,
 
     app_win: Option<AppWin>,
+    /// The app window as last painted (partial repaints draw into it) and its device px per DIP.
+    app_pm: Option<(Pixmap, f64)>,
+    /// Whether the app starts with the system (read when the app window opens, not every frame).
+    startup: Option<bool>,
+    /// A change that is saved a moment later (the opacity slider moves many times a second).
+    save_at: Option<Instant>,
     quitting: bool,
 }
 
@@ -302,6 +313,9 @@ impl App {
             dirty_panel: false,
             dirty_toast: true,
             app_win: None,
+            app_pm: None,
+            startup: None,
+            save_at: None,
             quitting: false,
         }
     }
@@ -678,7 +692,7 @@ impl App {
         self.net = Some(NetState { online, ms: online.then_some(ms) });
         self.dirty_card = true;
         if let Some(a) = &mut self.app_win {
-            a.dirty = true;
+            a.damage_net();
         }
         if online && was_offline {
             self.refresh(true);
@@ -741,12 +755,14 @@ impl App {
     }
 
     fn quit(&mut self, h: &mut dyn Host) {
+        self.save_at = None;
         self.save();
         self.quitting = true;
         h.quit();
     }
 
     fn restart(&mut self, h: &mut dyn Host) {
+        self.save_at = None;
         self.save();
         self.quitting = true;
         h.relaunch();
@@ -929,6 +945,7 @@ impl App {
     /// A normal window of its own, centred on the display the card is on.
     pub fn open_settings(&mut self, h: &mut dyn Host) {
         self.select(None);
+        self.startup = h.login_item();
         let title = format!("Ai Quota Overlay — {}", i18n::t(self.lang()).s.title);
         if h.app_is_open() {
             h.app_open(RectD::default(), &title);
@@ -949,12 +966,13 @@ impl App {
 
     fn close_settings(&mut self, h: &mut dyn Host) {
         h.app_close();
+        self.app_pm = None;
         self.app_win = None;
     }
 
     fn app_mouse(&mut self, h: &mut dyn Host, m: Mouse, x: f64, y: f64) {
         let Some(mut aw) = self.app_win.take() else { return };
-        let ctx = self.app_ctx(h);
+        let ctx = self.app_ctx();
         let actions = aw.mouse(&mut self.fonts, &ctx, m, x as f32, y as f32);
         h.set_cursor(aw.cursor());
         self.app_win = Some(aw);
@@ -963,12 +981,12 @@ impl App {
         }
     }
 
-    fn app_ctx(&self, h: &dyn Host) -> app_window::Ctx {
+    fn app_ctx(&self) -> app_window::Ctx {
         app_window::Ctx {
             lang: self.lang(),
             settings: self.settings.clone(),
             visible: self.visible,
-            startup: h.login_item(),
+            startup: self.startup,
             data: self.last.clone(),
             net: if self.settings.network { self.net } else { None },
             update: self.updater.view(self.settings.skip_version.as_deref()),
@@ -1004,10 +1022,13 @@ impl App {
                 self.select(None);
             }
             AppAction::Opacity(v) => {
+                // Only the overlay's alpha and the slider change: the app window repaints just the slider.
                 self.settings.opacity = (v.clamp(0.3, 1.0) * 100.0).round() / 100.0;
                 self.dirty_card = true;
                 self.dirty_panel = self.selected.is_some();
                 self.dirty_toast = true;
+                self.save_at = Some(Instant::now() + Duration::from_millis(500));
+                return;
             }
             AppAction::Network(on) => {
                 self.settings.network = on;
@@ -1015,6 +1036,7 @@ impl App {
             }
             AppAction::Startup(on) => {
                 h.set_login_item(on);
+                self.startup = h.login_item();
             }
             AppAction::Service(s, on) => {
                 self.settings.services[s.index()] = on;
@@ -1136,8 +1158,10 @@ impl App {
             return;
         }
         let now = Instant::now();
-        let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
+        let gap = now.duration_since(self.last_frame);
+        let dt = gap.as_secs_f32().min(0.1);
         self.last_frame = now;
+        let mut painted: Option<&'static str> = None;
         let mut animating = false;
         if self.card_hover.step(dt) | self.card_over.step(dt) {
             animating = true;
@@ -1209,26 +1233,64 @@ impl App {
             if !h.app_is_open() {
                 // Closed by the platform.
             } else {
-                let ctx = self.app_ctx(h);
+                let ctx = self.app_ctx();
                 if aw.step(dt) {
                     animating = true;
                 }
-                if aw.dirty {
-                    aw.dirty = false;
+                if aw.dirty || aw.damage.is_some() {
                     if let Some((w, hh, scale)) = h.app_size() {
                         let pw = (w * scale).round().max(1.0) as u32;
                         let ph = (hh * scale).round().max(1.0) as u32;
-                        if let Some(mut pm) = Pixmap::new(pw, ph) {
-                            {
-                                let mut c = Canvas::new(&mut pm, scale as f32, 0.0, 0.0);
-                                aw.draw(&mut c, &mut self.fonts, &ctx, w as f32, hh as f32);
+                        let same = self.app_pm.as_ref().is_some_and(|(p, s)| p.width() == pw && p.height() == ph && *s == scale);
+                        let damage = aw.damage.take();
+                        if aw.dirty || !same {
+                            painted = Some("full");
+                            aw.dirty = false;
+                            if let Some(mut pm) = Pixmap::new(pw, ph) {
+                                {
+                                    let mut c = Canvas::new(&mut pm, scale as f32, 0.0, 0.0);
+                                    aw.draw(&mut c, &mut self.fonts, &ctx, w as f32, hh as f32);
+                                }
+                                h.app_present(&pm);
+                                self.app_pm = Some((pm, scale));
                             }
-                            h.app_present(&pm);
+                        } else if let (Some(d), Some((pm, _))) = (damage, self.app_pm.as_mut()) {
+                            // Paint only the changed box: the whole layout runs (it is cheap) but every shape
+                            // outside the small canvas is skipped, then the box is copied in and shown.
+                            let s = scale as f32;
+                            let x0 = ((d.x * s).floor() as i32).clamp(0, pw as i32);
+                            let y0 = ((d.y * s).floor() as i32).clamp(0, ph as i32);
+                            let x1 = (((d.x + d.w) * s).ceil() as i32).clamp(0, pw as i32);
+                            let y1 = (((d.y + d.h) * s).ceil() as i32).clamp(0, ph as i32);
+                            if x1 > x0 && y1 > y0 {
+                                painted = Some("part");
+                                let (bw, bh) = ((x1 - x0) as u32, (y1 - y0) as u32);
+                                // A few px of margin: anti-aliasing right at a canvas edge comes out a shade
+                                // different, so the edge rows are painted but not kept.
+                                const M: u32 = 4;
+                                if let Some(mut part) = Pixmap::new(bw + 2 * M, bh + 2 * M) {
+                                    {
+                                        let mut c = Canvas::new(&mut part, s, 0.0, 0.0);
+                                        c.base = c.base.post_translate((M as i32 - x0) as f32, (M as i32 - y0) as f32);
+                                        aw.draw(&mut c, &mut self.fonts, &ctx, w as f32, hh as f32);
+                                    }
+                                    copy_into(pm, &part, (M, M, bw, bh), x0 as u32, y0 as u32);
+                                    h.app_present_rect(pm, (x0 as u32, y0 as u32, bw, bh));
+                                }
+                            }
                         }
                     }
                 }
                 self.app_win = Some(aw);
             }
+        }
+
+        if let Some(kind) = painted {
+            log_frame(gap, kind, now.elapsed());
+        }
+        if self.save_at.is_some_and(|t| now >= t) {
+            self.save_at = None;
+            self.save();
         }
 
         // Next wake-up.
@@ -1244,6 +1306,9 @@ impl App {
             min_at(self.next_net);
         }
         if let Some(t) = self.resume_at {
+            min_at(t);
+        }
+        if let Some(t) = self.save_at {
             min_at(t);
         }
         if let Some(t) = self.updater.next_due() {
@@ -1364,5 +1429,32 @@ impl App {
         h.present(WinKind::Toast, r, &pm, self.alpha(), false);
         self.toast_layout = Some(l);
         animating
+    }
+}
+
+/// Copies the box (x, y, w, h) of `part` into `pm` at (to_x, to_y) device px, replacing what was there.
+fn copy_into(pm: &mut Pixmap, part: &Pixmap, (x, y, w, h): (u32, u32, u32, u32), to_x: u32, to_y: u32) {
+    let (pw, sw) = (pm.width() as usize, part.width() as usize);
+    let rows = h.min(pm.height().saturating_sub(to_y)).min(part.height().saturating_sub(y)) as usize;
+    let cols = w.min(pm.width().saturating_sub(to_x)).min(part.width().saturating_sub(x)) as usize;
+    let src = part.data();
+    let dst = pm.data_mut();
+    for r in 0..rows {
+        let d = ((to_y as usize + r) * pw + to_x as usize) * 4;
+        let s0 = ((y as usize + r) * sw + x as usize) * 4;
+        dst[d..d + cols * 4].copy_from_slice(&src[s0..s0 + cols * 4]);
+    }
+}
+
+/// Dev aid: QUOTA_OVERLAY_LOG_FRAMES=<file> appends "<ms since the last frame> <full|part> <ms this frame took>" for
+/// every frame that repainted the app window, to check animation smoothness.
+fn log_frame(gap: Duration, kind: &str, took: Duration) {
+    use std::io::Write;
+    static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    let Some(path) = PATH.get_or_init(|| std::env::var_os("QUOTA_OVERLAY_LOG_FRAMES").map(Into::into)) else { return };
+    let line = format!("{:.1} {kind} {:.2}
+", gap.as_secs_f64() * 1000.0, took.as_secs_f64() * 1000.0);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = f.write_all(line.as_bytes());
     }
 }

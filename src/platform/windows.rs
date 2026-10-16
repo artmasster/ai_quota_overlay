@@ -23,7 +23,10 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{
     RegCloseKey, RegDeleteValueW, RegEnumValueW, RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_SZ,
 };
-use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
+use windows::Win32::System::Threading::{
+    CreateMutexW, CreateWaitableTimerExW, ReleaseMutex, SetWaitableTimer, WaitForSingleObject, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+    INFINITE, TIMER_ALL_ACCESS,
+};
 use windows::Win32::UI::Controls::{
     InitCommonControlsEx, ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX, MARGINS, TTTOOLINFOW, TOOLTIPS_CLASSW, TTF_IDISHWND, TTF_SUBCLASS,
     TTM_ADDTOOLW, TTM_POP, TTM_SETMAXTIPWIDTH, TTM_UPDATETIPTEXTW, TTS_ALWAYSTIP, TTS_NOPREFIX, WM_MOUSELEAVE,
@@ -76,6 +79,9 @@ thread_local! {
     static APP_PIXELS: RefCell<(u32, u32, Vec<u8>)> = const { RefCell::new((0, 0, Vec::new())) };
     /// The app window's fixed size in DIP (it is not resizable).
     static APP_DIP: Cell<(f64, f64)> = const { Cell::new((0.0, 0.0)) };
+    /// High-resolution waitable timer for animation frames (0 when the system has none), and whether it is armed.
+    static FRAME_TIMER: Cell<isize> = const { Cell::new(0) };
+    static FRAME_ARMED: Cell<bool> = const { Cell::new(false) };
     static DISPLAYS: RefCell<Vec<Mon>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -542,6 +548,36 @@ impl Host for WinHost {
         }
     }
 
+    fn app_present_rect(&mut self, pm: &Pixmap, r: (u32, u32, u32, u32)) {
+        let Some(h) = hwnd(WinKind::App) else { return };
+        let fits = APP_PIXELS.with(|p| {
+            let p = p.borrow();
+            p.0 == pm.width() && p.1 == pm.height()
+        });
+        if !fits {
+            return self.app_present(pm);
+        }
+        let (x, y, w, hh) = r;
+        let stride = pm.width() as usize * 4;
+        APP_PIXELS.with(|p| {
+            let mut p = p.borrow_mut();
+            let src = pm.data();
+            for row in y as usize..(y + hh) as usize {
+                let a = row * stride + x as usize * 4;
+                let b = a + w as usize * 4;
+                let dst = &mut p.2[a..b];
+                dst.copy_from_slice(&src[a..b]);
+                for px in dst.chunks_exact_mut(4) {
+                    px.swap(0, 2);
+                }
+            }
+        });
+        let rc = RECT { left: x as i32, top: y as i32, right: (x + w) as i32, bottom: (y + hh) as i32 };
+        unsafe {
+            let _ = InvalidateRect(Some(h), Some(&rc), false);
+        }
+    }
+
     fn app_title(&mut self, title: &str) {
         if let Some(h) = hwnd(WinKind::App) {
             let t = wide(title);
@@ -624,6 +660,18 @@ impl Host for WinHost {
 
     fn set_timer(&mut self, after: Duration) {
         unsafe {
+            // SetTimer only fires on the 15.6 ms system tick, so a 16 ms animation frame comes 31 ms later and the
+            // motion judders. Short waits also go through a high-resolution waitable timer that the message loop
+            // waits on; SetTimer stays as the fallback (it also keeps ticking inside modal loops such as a drag).
+            let frame = FRAME_TIMER.with(|t| t.get());
+            if after <= Duration::from_millis(50) && frame != 0 {
+                let due = -((after.as_micros() as i64) * 10).max(1);
+                if SetWaitableTimer(HANDLE(frame as *mut _), &due, 0, None, None, false).is_ok() {
+                    FRAME_ARMED.with(|a| a.set(true));
+                }
+            } else {
+                FRAME_ARMED.with(|a| a.set(false));
+            }
             SetTimer(Some(main_hwnd()), TIMER_ID, after.as_millis().clamp(1, u32::MAX as u128) as u32, None);
         }
     }
@@ -882,6 +930,7 @@ unsafe extern "system" fn main_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
     match msg {
         WM_TIMER if wp.0 == TIMER_ID => {
             let _ = KillTimer(Some(h), TIMER_ID);
+            FRAME_ARMED.with(|a| a.set(false));
             dispatch(Ev::Timer);
             LRESULT(0)
         }
@@ -1044,12 +1093,17 @@ unsafe extern "system" fn app_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) ->
             let dc = BeginPaint(h, &mut ps);
             APP_PIXELS.with(|p| {
                 let p = p.borrow();
-                if p.0 > 0 {
+                // Only the rows of the invalid box go across (a top-down DIB starting at its first row).
+                let rc = ps.rcPaint;
+                let top = rc.top.clamp(0, p.1 as i32);
+                let bottom = rc.bottom.clamp(top, p.1 as i32);
+                if p.0 > 0 && bottom > top {
+                    let rows = (bottom - top) as u32;
                     let bmi = BITMAPINFO {
                         bmiHeader: BITMAPINFOHEADER {
                             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
                             biWidth: p.0 as i32,
-                            biHeight: -(p.1 as i32),
+                            biHeight: -(rows as i32),
                             biPlanes: 1,
                             biBitCount: 32,
                             biCompression: BI_RGB.0,
@@ -1057,7 +1111,8 @@ unsafe extern "system" fn app_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) ->
                         },
                         ..Default::default()
                     };
-                    SetDIBitsToDevice(dc, 0, 0, p.0, p.1, 0, 0, 0, p.1, p.2.as_ptr() as *const _, &bmi, DIB_RGB_COLORS);
+                    let bits = p.2[top as usize * p.0 as usize * 4..].as_ptr();
+                    SetDIBitsToDevice(dc, 0, top, p.0, rows, 0, 0, 0, rows, bits as *const _, &bmi, DIB_RGB_COLORS);
                 }
             });
             let _ = EndPaint(h, &ps);
@@ -1191,10 +1246,36 @@ pub fn run(fetcher: Fetcher) {
         BUSY.with(|b| b.set(false));
         dispatch(Ev::Wake);
 
+        let frame = CreateWaitableTimerExW(None, PCWSTR::null(), CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS.0)
+            .map(|h| h.0 as isize)
+            .unwrap_or(0);
+        FRAME_TIMER.with(|t| t.set(frame));
         let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+        'run: loop {
+            if frame != 0 {
+                let handles = [HANDLE(frame as *mut _)];
+                let r = MsgWaitForMultipleObjectsEx(Some(&handles), INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+                if r == WAIT_OBJECT_0 {
+                    if FRAME_ARMED.with(|a| a.replace(false)) {
+                        let _ = KillTimer(Some(main_hwnd()), TIMER_ID);
+                        dispatch(Ev::Timer);
+                    }
+                    continue;
+                }
+                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    if msg.message == WM_QUIT {
+                        break 'run;
+                    }
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            } else {
+                if !GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                    break;
+                }
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
         }
 
         CTL.with(|c| {
