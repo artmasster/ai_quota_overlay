@@ -159,6 +159,57 @@ pub fn run(dir: &Path) -> std::io::Result<()> {
         img.save_png(dir.join(format!("{name}.png"))).map_err(std::io::Error::other)?;
         println!("wrote {}", dir.join(format!("{name}.png")).display());
     }
+    app_window(dir, &mut fonts, now)
+}
+
+/// The whole app window, tall enough to show everything without scrolling (settings-en.png / settings-th.png).
+pub fn app_window(dir: &Path, fonts: &mut Fonts, now: i64) -> std::io::Result<()> {
+    use crate::ui::app_window::{AppWin, Ctx};
+    use crate::updater::{Phase, View};
+    let zoom: f32 = std::env::var("AQO_SETTINGS_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(2.0);
+    let data = demo(now - 2000);
+    for (name, lang) in [("settings-en", Lang::En), ("settings-th", Lang::Th)] {
+        let mut settings = crate::settings::Settings { network: true, lang: lang.key().into(), ..Default::default() };
+        settings.hidden = demo_hidden();
+        for s in crate::model::SERVICES {
+            settings.seen[s.index()] = data.get(s).map(|q| q.windows.iter().map(|w| w.seen()).collect());
+        }
+        let ctx = Ctx {
+            lang,
+            settings,
+            visible: true,
+            startup: Some(true),
+            data: Some(data.clone()),
+            net: Some(NetState { online: true, ms: Some(23) }),
+            update: View {
+                phase: Phase::Available,
+                current: env!("CARGO_PKG_VERSION").into(),
+                version: Some("2.1.0".into()),
+                percent: 0,
+                manual: false,
+                error: None,
+                skipped: false,
+                dismissed: false,
+            },
+            version: env!("CARGO_PKG_VERSION").into(),
+            now,
+        };
+        let w = 440.0;
+        let mut aw = AppWin::new();
+        {
+            let mut scratch = Pixmap::new(10, 10).unwrap();
+            let mut c = Canvas::new(&mut scratch, 1.0, 0.0, 0.0);
+            aw.draw(&mut c, fonts, &ctx, w, 4000.0);
+        }
+        let h = 46.0 + aw.content_height();
+        let mut pm = Pixmap::new((w * zoom).round() as u32, (h * zoom).ceil() as u32).expect("pixmap");
+        {
+            let mut c = Canvas::new(&mut pm, zoom, 0.0, 0.0);
+            aw.draw(&mut c, fonts, &ctx, w, h);
+        }
+        pm.save_png(dir.join(format!("{name}.png"))).map_err(std::io::Error::other)?;
+        println!("wrote {}", dir.join(format!("{name}.png")).display());
+    }
     Ok(())
 }
 

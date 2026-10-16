@@ -1,13 +1,18 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod anim;
+mod app;
 mod fmt;
 mod http;
 mod i18n;
 mod model;
+mod platform;
 mod quota;
+mod settings;
 mod shots;
 mod sqlite;
 mod ui;
+mod updater;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -17,5 +22,7 @@ fn main() {
             eprintln!("screenshots: {e}");
             std::process::exit(1);
         }
+        return;
     }
+    platform::run(quota::fetch_all);
 }

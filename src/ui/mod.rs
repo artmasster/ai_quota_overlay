@@ -1,4 +1,5 @@
 //! Views drawn by hand in CSS px, matching the old pages (src/*.html on `old-electron`).
+pub mod app_window;
 pub mod card;
 pub mod gfx;
 pub mod icons;

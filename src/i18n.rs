@@ -2,7 +2,7 @@
 //! seconds and errors a code, and are worded here.
 use crate::model::{QErr, Win};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Lang {
     En,
     Th,
