@@ -118,6 +118,10 @@
 <td align="center"><b>มีอัปเดต</b><br><img src="docs/update.png" width="300"></td>
 <td align="center"><b>กำลังดาวน์โหลด</b><br><img src="docs/update-progress.png" width="300"></td>
 </tr>
+<tr>
+<td align="center"><b>กำลังติดตั้ง</b><br><img src="docs/update-installing.png" width="300"></td>
+<td align="center"><b>ดาวน์โหลดไม่สำเร็จ</b><br><img src="docs/update-error.png" width="300"></td>
+</tr>
 </table>
 
 <table>
@@ -142,7 +146,8 @@
 <td align="center"><b>ภาษาไทย</b><br><img src="docs/thai.png" width="300"></td>
 </tr>
 <tr>
-<td align="center" colspan="2"><b>login หมดอายุ — บอกวิธีแก้ในกล่อง</b><br><img src="docs/error.png" width="300"></td>
+<td align="center"><b>หลุดเน็ต — ไฟแดงกะพริบ</b><br><img src="docs/offline.png" width="300"></td>
+<td align="center"><b>login หมดอายุ — บอกวิธีแก้ในกล่อง</b><br><img src="docs/error.png" width="300"></td>
 </tr>
 </table>
 
