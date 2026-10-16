@@ -1,0 +1,23 @@
+name: CI
+
+# Build and test on every push to main: Windows, macOS and Linux. Compiler errors show up as annotations.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+      - run: cargo build --release --locked
+      - run: cargo test --locked

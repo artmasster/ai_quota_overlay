@@ -58,6 +58,9 @@ x11rb = { version = "0.13", features = ["image", "randr"] }
 ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
 global-hotkey = "0.7"
 
+[build-dependencies]
+embed-resource = "3"
+
 [profile.release]
 opt-level = "s"
 lto = true
