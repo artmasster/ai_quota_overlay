@@ -30,14 +30,15 @@ jobs:
         env:
           RUSTFLAGS: -C target-feature=+crt-static
         run: cargo build --release --locked
-      - name: Installer (unsigned, for checking)
-        shell: bash
+      -       - name: Installer (unsigned, for checking)
+        shell: pwsh
         run: |
-          V=$(cargo metadata --no-deps --format-version 1 | python -c "import json,sys; print(json.load(sys.stdin)['packages'][0]['version'])")
-          mkdir -p dist
-          "/c/Program Files (x86)/NSIS/makensis.exe" -V2 -DVERSION=$V -DEXE_PATH="$PWD/target/release/ai-quota-overlay.exe" \
-            -DOUTFILE="$PWD/dist/AiQuotaOverlay-$V-win-x64-setup.exe" installer/installer.nsi
-      - uses: actions/upload-artifact@v4
+          $v = (Select-String Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          $mk = (Get-Command makensis -ErrorAction SilentlyContinue).Source
+          if (-not $mk) { choco install nsis -y --no-progress | Out-Null; $mk = 'C:\Program Files (x86)\NSIS\makensis.exe' }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          & $mk /V2 "/DVERSION=$v" "/DEXE_PATH=$PWD\target\release\ai-quota-overlay.exe" "/DOUTFILE=$PWD\dist\AiQuotaOverlay-$v-win-x64-setup.exe" installer\installer.nsi
+          if ($LASTEXITCODE) { exit 1 }uses: actions/upload-artifact@v4
         with:
           name: windows-unsigned
           path: dist/*.exe
