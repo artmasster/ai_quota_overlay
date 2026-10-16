@@ -23,15 +23,24 @@ const CLAUDE_TOKEN_URLS = [
   'https://console.anthropic.com/v1/oauth/token',
 ];
 
-const CLAUDE_LABELS = {
-  five_hour: '5 ชม.',
-  seven_day: '7 วัน',
-  seven_day_opus: '7 วัน · Opus',
-  seven_day_sonnet: '7 วัน · Sonnet',
-  seven_day_oauth_apps: '7 วัน · แอปอื่น',
+// Windows are language-neutral: an id, a span in seconds and a model name or tag, worded by src/i18n.js.
+const H = 3600;
+const CLAUDE_WINDOWS = {
+  five_hour: { span: 5 * H },
+  seven_day: { span: 168 * H },
+  seven_day_opus: { span: 168 * H, name: 'Opus' },
+  seven_day_sonnet: { span: 168 * H, name: 'Sonnet' },
+  seven_day_oauth_apps: { span: 168 * H, tag: 'otherApps' },
 };
 
-class QuotaError extends Error {}
+// code names the message in src/i18n.js (errors.*); params fill it in.
+class QuotaError extends Error {
+  constructor(code, params = {}) {
+    super(code);
+    this.code = code;
+    this.params = params;
+  }
+}
 // Thrown when a service has no login on this machine at all; the overlay hides it.
 class NotLoggedIn extends Error {}
 
@@ -76,9 +85,7 @@ async function refreshClaudeToken(oauth) {
     writeJsonAtomic(CLAUDE_CREDS, current);
     return t.access_token;
   }
-  throw new QuotaError(
-    lastStatus ? `login หมดอายุ (${lastStatus}) — เปิด terminal พิมพ์ claude แล้ว /login` : 'ต่ออินเทอร์เน็ตไม่ได้',
-  );
+  throw lastStatus ? new QuotaError('claudeExpired', { status: lastStatus }) : new QuotaError('offline');
 }
 
 // Claude Code keeps its login in ~/.claude/.credentials.json on Windows/Linux and in the Keychain on macOS.
@@ -99,7 +106,7 @@ async function claudeAccessToken(force = false) {
   if (!oauth?.accessToken) throw new NotLoggedIn();
   if (!force && oauth.expiresAt - Date.now() > 60_000) return oauth.accessToken;
   // Refreshing rotates the refresh token; only do it where the new one can be written back for the CLI.
-  if (source !== 'file') throw new QuotaError('login หมดอายุ — เปิด claude ใน terminal สักครั้ง');
+  if (source !== 'file') throw new QuotaError('claudeExpiredKeychain');
   return refreshClaudeToken(oauth);
 }
 
@@ -111,15 +118,16 @@ async function fetchClaude() {
 
   let res = await call(await claudeAccessToken());
   if (res.status === 401) res = await call(await claudeAccessToken(true));
-  if (res.status === 429) throw new QuotaError('ถูกจำกัดการเช็ค รอสักครู่');
-  if (!res.ok) throw new QuotaError(`Claude ตอบ ${res.status}`);
+  if (res.status === 429) throw new QuotaError('rateLimited');
+  if (!res.ok) throw new QuotaError('status', { service: 'Claude', status: res.status });
   const data = await res.json();
 
   const windows = Object.entries(data)
     // Unknown internal buckets without a reset time are placeholders, not real limits.
-    .filter(([key, w]) => typeof w?.utilization === 'number' && (CLAUDE_LABELS[key] || w.resets_at))
+    .filter(([key, w]) => typeof w?.utilization === 'number' && (CLAUDE_WINDOWS[key] || w.resets_at))
     .map(([key, w]) => ({
-      label: CLAUDE_LABELS[key] ?? key.replaceAll('_', ' '),
+      id: key,
+      ...(CLAUDE_WINDOWS[key] ?? { name: key.replaceAll('_', ' ') }),
       usedPercent: w.utilization,
       resetsAt: w.resets_at ? Date.parse(w.resets_at) : null,
     }));
@@ -127,12 +135,6 @@ async function fetchClaude() {
     ? { used: data.extra_usage.used_credits, limit: data.extra_usage.monthly_limit }
     : null;
   return { plan, windows, extra };
-}
-
-function windowLabel(seconds) {
-  const h = Math.round(seconds / 3600);
-  if (h % 24 === 0) return `${h / 24} วัน`;
-  return `${h} ชม.`;
 }
 
 async function fetchCodex() {
@@ -147,16 +149,19 @@ async function fetchCodex() {
       'User-Agent': 'codex_cli_rs',
     },
   });
-  if (res.status === 401) throw new QuotaError('login หมดอายุ — เปิดแอป Codex สักครั้ง');
-  if (!res.ok) throw new QuotaError(`Codex ตอบ ${res.status}`);
+  if (res.status === 401) throw new QuotaError('codexExpired');
+  if (!res.ok) throw new QuotaError('status', { service: 'Codex', status: res.status });
   const data = await res.json();
 
   const rl = data.rate_limit ?? {};
-  const windows = [rl.primary_window, rl.secondary_window].filter(Boolean).map((w) => ({
-    label: windowLabel(w.limit_window_seconds),
-    usedPercent: w.used_percent,
-    resetsAt: w.reset_at ? w.reset_at * 1000 : Date.now() + w.reset_after_seconds * 1000,
-  }));
+  const windows = [['primary', rl.primary_window], ['secondary', rl.secondary_window]]
+    .filter(([, w]) => w)
+    .map(([id, w]) => ({
+      id,
+      span: w.limit_window_seconds,
+      usedPercent: w.used_percent,
+      resetsAt: w.reset_at ? w.reset_at * 1000 : Date.now() + w.reset_after_seconds * 1000,
+    }));
   const credits = data.credits?.has_credits && !data.credits.unlimited
     ? { balance: Number(data.credits.balance) }
     : null;
@@ -178,23 +183,22 @@ function readCursorAuth() {
   }
 }
 
-const CURSOR_EXPIRED = 'login หมดอายุ — เปิดแอป Cursor สักครั้ง';
-
 async function fetchCursor() {
   const { token, plan } = readCursorAuth();
   const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
-  if (payload.exp && payload.exp * 1000 < Date.now()) throw new QuotaError(CURSOR_EXPIRED);
+  if (payload.exp && payload.exp * 1000 < Date.now()) throw new QuotaError('cursorExpired');
   const userId = String(payload.sub).split('|').pop();
   const headers = { Cookie: `WorkosCursorSessionToken=${userId}%3A%3A${token}`, Origin: 'https://cursor.com' };
 
   // Current (usage-based) plans.
   const res = await fetch('https://cursor.com/api/usage-summary', { headers });
-  if (res.status === 401 || res.status === 403) throw new QuotaError(CURSOR_EXPIRED);
+  if (res.status === 401 || res.status === 403) throw new QuotaError('cursorExpired');
   if (res.ok) {
     const data = await res.json();
     const p = data.individualUsage?.plan;
     const windows = p ? [{
-      label: 'รอบบิล',
+      id: 'billing',
+      billing: true,
       usedPercent: typeof p.totalPercentUsed === 'number' ? p.totalPercentUsed : p.limit ? (p.used / p.limit) * 100 : 0,
       resetsAt: data.billingCycleEnd ? Date.parse(data.billingCycleEnd) : null,
     }] : [];
@@ -205,13 +209,15 @@ async function fetchCursor() {
 
   // Older request-count plans: one window per model, all resetting a month after startOfMonth.
   const old = await fetch(`https://cursor.com/api/usage?user=${encodeURIComponent(userId)}`, { headers });
-  if (!old.ok) throw new QuotaError(`Cursor ตอบ ${res.status}/${old.status}`);
+  if (!old.ok) throw new QuotaError('status', { service: 'Cursor', status: `${res.status}/${old.status}` });
   const data = await old.json();
   const reset = data.startOfMonth ? new Date(data.startOfMonth) : null;
   reset?.setMonth(reset.getMonth() + 1);
   const windows = Object.entries(data)
     .filter(([, u]) => u?.maxRequestUsage)
-    .map(([model, u]) => ({ label: model, usedPercent: (u.numRequests / u.maxRequestUsage) * 100, resetsAt: reset?.getTime() ?? null }));
+    .map(([model, u]) => ({
+      id: model, name: model, usedPercent: (u.numRequests / u.maxRequestUsage) * 100, resetsAt: reset?.getTime() ?? null,
+    }));
   return { plan, windows, extra: null };
 }
 
@@ -220,18 +226,21 @@ async function settle(fn) {
     return { ok: true, ...(await fn()) };
   } catch (e) {
     if (e instanceof NotLoggedIn) return { ok: false, absent: true };
-    if (e instanceof TypeError && e.message === 'fetch failed') return { ok: false, error: 'ต่ออินเทอร์เน็ตไม่ได้' };
-    return { ok: false, error: e instanceof QuotaError ? e.message : `ผิดพลาด: ${e.message}` };
+    if (e instanceof TypeError && e.message === 'fetch failed') return { ok: false, error: { code: 'offline' } };
+    if (e instanceof QuotaError) return { ok: false, error: { code: e.code, ...e.params } };
+    return { ok: false, error: { code: 'unexpected', message: e.message } };
   }
 }
 
-// QUOTA_OVERLAY_SERVICES=claude,codex limits which services are checked (default: all).
+// enabled = { cursor: false, … } skips a service switched off in Settings; it comes back as disabled.
+// QUOTA_OVERLAY_SERVICES=claude,codex also limits which services are checked (default: all).
 const FETCHERS = { claude: fetchClaude, codex: fetchCodex, cursor: fetchCursor };
 
-async function fetchAll() {
+async function fetchAll(enabled = {}) {
   const only = process.env.QUOTA_OVERLAY_SERVICES?.toLowerCase().split(',').map((s) => s.trim());
+  const skip = (key) => enabled[key] === false || (only && !only.includes(key));
   const entries = await Promise.all(Object.entries(FETCHERS).map(async ([key, fn]) =>
-    [key, only && !only.includes(key) ? { ok: false, absent: true } : await settle(fn)]));
+    [key, skip(key) ? { ok: false, absent: true, disabled: true } : await settle(fn)]));
   return { ...Object.fromEntries(entries), fetchedAt: Date.now() };
 }
 

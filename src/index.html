@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="th">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
@@ -63,6 +63,23 @@
   .ring text { font-weight: 700; font-size: 10.5px; fill: var(--text); font-variant-numeric: tabular-nums; }
   .lbl { color: var(--muted); font-size: 9.5px; margin-top: 1px; }
   .empty { color: var(--muted); padding: 2px 4px; }
+  .net + .empty { margin-left: 10px; border-left: 1px solid var(--line); padding-left: 10px; }
+
+  /* Internet status: a solid round light, green with the ping when online, flashing red when offline. */
+  .net .name { color: var(--ok); }
+  .net-light { padding: 2px 2px 1px; display: flex; flex-direction: column; align-items: center; }
+  .net-dot {
+    width: 36px; height: 36px; border-radius: 50%;
+    display: grid; place-items: center;
+    color: #0b1a10; background: var(--ok);
+    box-shadow: 0 0 10px color-mix(in srgb, var(--ok) 55%, transparent);
+  }
+  .net.off .name, .net.off .lbl { color: var(--bad); font-weight: 700; }
+  .net.off .net-dot { color: #fff; background: var(--bad); animation: alarm 1s ease-in-out infinite; }
+  @keyframes alarm {
+    50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--bad) 35%, transparent), 0 0 16px var(--bad); opacity: .75; }
+  }
+  body.offline .card, body.offline .card:hover { border-color: var(--bad); }
 
   /* ---------- detail panel ---------- */
   .detail {
@@ -109,11 +126,25 @@
   .d-row .when { margin-left: auto; color: var(--muted); font-size: 11px; }
   .d-err { color: var(--warn); font-size: 11.5px; line-height: 1.45; }
   .d-hint { color: var(--muted); font-size: 10.5px; margin-top: 6px; }
+  .d-win { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* "⋯" at the end of the card: opens the Settings window. Faint until the card is hovered. */
+  .more {
+    display: grid; place-items: center; align-self: stretch;
+    width: 14px; margin: -2px -5px -1px -4px; border-radius: 7px;
+    color: var(--muted); cursor: pointer; opacity: .45;
+    transition: opacity .12s, background .12s, color .12s;
+  }
+  .card:hover .more { opacity: 1; }
+  .more:hover { background: rgba(255, 255, 255, .09); color: var(--text); }
+  body.vertical .more { width: auto; height: 12px; margin: -3px -2px -2px; }
+  body.vertical .more svg { transform: rotate(90deg); }
 </style>
 </head>
 <body>
 <div class="card" id="card"><span class="empty">…</span></div>
 <div class="detail" id="detail"></div>
+<script src="i18n.js"></script>
 <script>
   // ?view=card shows the rings, ?view=panel the details of the ring that was clicked (see main.js).
   const view = new URLSearchParams(location.search).get('view');
@@ -126,24 +157,35 @@
   ];
   const ICON_CLOCK = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="8" cy="8" r="6.3"/><path d="M8 4.6V8l2.3 1.5"/></svg>';
   const ICON_COIN = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><ellipse cx="8" cy="5" rx="5.5" ry="2.3"/><path d="M2.5 5v6c0 1.3 2.5 2.3 5.5 2.3s5.5-1 5.5-2.3V5M2.5 8c0 1.3 2.5 2.3 5.5 2.3s5.5-1 5.5-2.3"/></svg>';
+  const ICON_MORE = '<svg width="4" height="16" viewBox="0 0 4 16" fill="currentColor"><circle cx="2" cy="3" r="1.5"/><circle cx="2" cy="8" r="1.5"/><circle cx="2" cy="13" r="1.5"/></svg>';
+
+  const ICON_WIFI = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M2.5 9a14 14 0 0 1 19 0M6 12.8a9 9 0 0 1 12 0M9.3 16.4a4.4 4.4 0 0 1 5.4 0"/><circle cx="12" cy="19.6" r="1.4" fill="currentColor" stroke="none"/></svg>';
+  const ICON_WIFI_OFF = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M2.5 9a14 14 0 0 1 19 0M6 12.8a9 9 0 0 1 12 0M9.3 16.4a4.4 4.4 0 0 1 5.4 0M3 3l18 18"/><circle cx="12" cy="19.6" r="1.4" fill="currentColor" stroke="none"/></svg>';
 
   let data = null;
+  let network = null; // { online, ms }, null while the internet check is off
   let selected = null; // { svc, index }
+  // Pushed by main (see publicSettings in main.js).
+  let cfg = { lang: 'en', vertical: false, network: false, services: {}, hidden: {} };
+  const T = () => I18N.t(cfg.lang);
 
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const color = (left) => (left > 50 ? 'var(--ok)' : left > 20 ? 'var(--warn)' : 'var(--bad)');
-  const short = (label) => label.replace(' ชม.', 'ช').replace(' วัน', 'ว').replace('รอบบิล', 'บิล');
-  // Label under a ring: time left until reset, as days to one decimal (1.3 วัน), else whole hours or minutes;
+  // Label under a ring: time left until reset, as days to one decimal (1.3d), else whole hours or minutes;
   // window name if no reset time. Rounded down, so it never shows more time than is left.
   function leftLabel(w) {
-    if (!w.resetsAt) return short(w.label);
+    const t = T();
+    if (!w.resetsAt) return I18N.windowLabel(w, cfg.lang, true);
     const m = Math.max(0, Math.floor((w.resetsAt - Date.now()) / 60000));
-    if (m >= 1440) return `${(Math.floor(m / 144) / 10).toFixed(1)} วัน`;
-    if (m >= 60) return `${Math.floor(m / 60)} ชม`;
-    return `${m} นาที`;
+    if (m >= 1440) return t.leftDays((Math.floor(m / 144) / 10).toFixed(1));
+    if (m >= 60) return t.leftHours(Math.floor(m / 60));
+    return t.leftMinutes(m);
   }
+  // Inside the big ring only the span fits ("5h", "7d"); the model name goes in the panel header.
+  const ringLabel = (w) => I18N.windowLabel(w.span || w.billing ? { ...w, name: null, tag: null } : w, cfg.lang, true);
   const clamp = (v) => Math.max(0, Math.min(100, v));
   const svcOf = (key) => SERVICES.find((s) => s.key === key);
+  const isShown = (key, w) => !(cfg.hidden[key] ?? []).includes(w.id);
 
   function ringSvg(size, stroke, left, text) {
     const r = size / 2 - stroke / 2 - 1;
@@ -162,25 +204,53 @@
     const d = Math.floor(s / 86400); s %= 86400;
     const h = Math.floor(s / 3600); s %= 3600;
     const m = Math.floor(s / 60);
-    return d ? `${d} วัน ${h} ชม.` : h ? `${h} ชม. ${m} นาที` : `${m} นาที`;
+    return T().until(d, h, m);
   }
 
   function whenText(ts) {
-    const t = new Date(ts);
-    const time = t.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+    const t = T();
+    const at = new Date(ts);
+    const time = at.toLocaleTimeString(t.locale, { hour: '2-digit', minute: '2-digit' });
     const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
-    const diff = Math.round((day(t) - day(new Date())) / 86400000);
-    if (diff === 0) return `วันนี้ ${time}`;
-    if (diff === 1) return `พรุ่งนี้ ${time}`;
-    return `${t.toLocaleDateString('th-TH', { weekday: 'short', day: 'numeric', month: 'short' })} ${time}`;
+    const diff = Math.round((day(at) - day(new Date())) / 86400000);
+    if (diff === 0) return `${t.today} ${time}`;
+    if (diff === 1) return `${t.tomorrow} ${time}`;
+    return `${at.toLocaleDateString(t.locale, { weekday: 'short', day: 'numeric', month: 'short' })} ${time}`;
   }
 
   // ---------- compact card ----------
+  function netHtml() {
+    if (!cfg.network || !network) return '';
+    const t = T();
+    const { online, ms } = network;
+    return `<div class="svc net ${online ? 'on' : 'off'}" title="${esc(online ? t.online : t.offlineTitle)}">
+      <span class="name">${esc(t.net)}</span>
+      <div class="net-light"><div class="net-dot">${online ? ICON_WIFI : ICON_WIFI_OFF}</div>
+        <span class="lbl">${online ? `${ms} ms` : esc(t.offline)}</span></div></div>`;
+  }
+
+  const moreHtml = () => `<div class="more" title="${esc(T().more)}">${ICON_MORE}</div>`;
+
   function renderCard() {
-    const shown = SERVICES.filter((s) => data[s.key] && !data[s.key].absent);
-    if (selected && !shown.some((s) => s.key === selected.svc)) window.overlay.select(null);
+    const t = T();
+    if (!data) {
+      root.innerHTML = netHtml() + '<span class="empty">…</span>' + moreHtml();
+      return;
+    }
+    // A service shows when it's switched on, logged in, and has at least one window left on (or an error to show).
+    const shown = SERVICES.map((s) => {
+      const r = data[s.key];
+      if (cfg.services[s.key] === false || !r || r.absent) return null;
+      const wins = r.ok ? r.windows.map((w, i) => ({ w, i })).filter(({ w }) => isShown(s.key, w)) : [];
+      if (r.ok && r.windows.length && !wins.length) return null;
+      return { s, r, wins };
+    }).filter(Boolean);
+    if (selected && !shown.some(({ s, wins }) => s.key === selected.svc
+      && (selected.index < 0 || wins.some(({ i }) => i === selected.index)))) window.overlay.select(null);
     if (!shown.length) {
-      root.innerHTML = '<span class="empty">Not logged in to Claude, Codex or Cursor</span>';
+      const anyOn = SERVICES.some((s) => cfg.services[s.key] !== false && data[s.key] && !data[s.key].absent);
+      const allOff = SERVICES.every((s) => cfg.services[s.key] === false);
+      root.innerHTML = netHtml() + `<span class="empty">${esc(anyOn || allOff ? t.allOff : t.notLoggedIn)}</span>` + moreHtml();
       return;
     }
     const ring = (s, index, left, label, text) => {
@@ -188,44 +258,45 @@
       return `<div class="ring${sel}" style="--accent:${s.color}" data-svc="${s.key}" data-index="${index}">
         ${ringSvg(36, 4, left, text ?? Math.round(left))}<span class="lbl">${esc(label)}</span></div>`;
     };
-    root.innerHTML = shown.map((s) => {
-      const r = data[s.key];
-      const rings = !r.ok ? ring(s, -1, 0, 'error', '!')
-        : r.windows.length ? r.windows.map((w, i) => ring(s, i, 100 - w.usedPercent, leftLabel(w))).join('')
-        : ring(s, -1, 0, 'ไม่มีข้อมูล', '–');
+    root.innerHTML = netHtml() + shown.map(({ s, r, wins }) => {
+      const rings = !r.ok ? ring(s, -1, 0, t.error, '!')
+        : wins.length ? wins.map(({ w, i }) => ring(s, i, 100 - w.usedPercent, leftLabel(w))).join('')
+        : ring(s, -1, 0, t.noData, '–');
       return `<div class="svc"><span class="name" style="color:${s.color}">${s.name}</span><div class="rings">${rings}</div></div>`;
-    }).join('');
+    }).join('') + moreHtml();
   }
 
   // ---------- detail panel ----------
   function detailHtml(s, r, index) {
+    const t = T();
+    const w = r.ok && index >= 0 ? r.windows[index] : null;
     const badge = r.ok && r.plan ? `<span class="d-badge">${esc(r.plan.toUpperCase())}</span>` : '';
-    const head = `<div class="d-head"><span class="d-dot"></span><span class="d-name">${s.name}</span>${badge}
-      <button class="d-close" title="Close">×</button></div>`;
+    const win = w ? `<span class="d-win">${esc(I18N.windowLabel(w, cfg.lang))}</span>` : '';
+    const head = `<div class="d-head"><span class="d-dot"></span><span class="d-name">${s.name}</span>${badge}${win}
+      <button class="d-close" title="${esc(t.close)}">×</button></div>`;
 
     if (!r.ok) {
-      return `${head}<div class="d-err">${esc(r.error)}</div>
-        <div class="d-hint">ดับเบิลคลิกที่กล่องเพื่อลองใหม่</div>`;
+      return `${head}<div class="d-err">${esc(I18N.errorText(r.error, cfg.lang))}</div>
+        <div class="d-hint">${esc(t.retryHint)}</div>`;
     }
-    if (index < 0) return `${head}<div class="d-cap">ไม่มีข้อมูลโควต้า</div>`;
+    if (!w) return `${head}<div class="d-cap">${esc(t.noQuota)}</div>`;
 
-    const w = r.windows[index];
     const left = clamp(100 - w.usedPercent);
     const rows = [];
     if (w.resetsAt) {
-      rows.push(`<div class="d-row">${ICON_CLOCK}<span>รีเซ็ตใน <b>${untilText(w.resetsAt)}</b></span><span class="when">${whenText(w.resetsAt)}</span></div>`);
+      rows.push(`<div class="d-row">${ICON_CLOCK}<span>${esc(t.resetsIn)} <b>${untilText(w.resetsAt)}</b></span><span class="when">${whenText(w.resetsAt)}</span></div>`);
     }
     if (s.key === 'codex' && r.credits) {
-      rows.push(`<div class="d-row">${ICON_COIN}<span>เครดิตเหลือ <b>${Math.floor(r.credits.balance).toLocaleString()}</b></span></div>`);
+      rows.push(`<div class="d-row">${ICON_COIN}<span>${esc(t.creditsLeft)} <b>${Math.floor(r.credits.balance).toLocaleString(t.locale)}</b></span></div>`);
     } else if (r.extra) {
-      rows.push(`<div class="d-row">${ICON_COIN}<span>ใช้เกินแพ็กเกจ <b>$${(r.extra.used / 100).toFixed(2)}</b> / $${(r.extra.limit / 100).toFixed(0)}</span></div>`);
+      rows.push(`<div class="d-row">${ICON_COIN}<span>${esc(t.extraUsage)} <b>$${(r.extra.used / 100).toFixed(2)}</b> / $${(r.extra.limit / 100).toFixed(0)}</span></div>`);
     }
     return `${head}
       <div class="d-main">
-        ${ringSvg(58, 6, left, w.label)}
+        ${ringSvg(58, 6, left, ringLabel(w))}
         <div>
           <div class="d-big" style="color:${color(left)}">${Math.round(left)}<small>%</small></div>
-          <div class="d-cap">เหลือ · ใช้ไป ${Math.round(w.usedPercent)}%</div>
+          <div class="d-cap">${esc(t.leftUsed(Math.round(w.usedPercent)))}</div>
         </div>
       </div>
       ${rows.length ? `<div class="d-rows">${rows.join('')}</div>` : ''}`;
@@ -233,15 +304,14 @@
 
   function renderDetail() {
     const s = selected && svcOf(selected.svc);
-    if (!s || !data) return;
+    if (!s || !data?.[s.key]) return;
     root.style.setProperty('--accent', s.color);
     root.innerHTML = detailHtml(s, data[s.key], selected.index);
   }
 
   function render() {
-    if (!data) return;
     if (view === 'card') renderCard();
-    else renderDetail();
+    else if (data) renderDetail();
   }
 
   // Main fits this page's window around its element.
@@ -254,6 +324,13 @@
   window.overlay.onQuota((d) => {
     data = d;
     document.body.classList.remove('loading');
+    render();
+  });
+  window.overlay.onSettings((next) => {
+    cfg = next;
+    document.documentElement.lang = cfg.lang;
+    document.body.classList.toggle('vertical', !!cfg.vertical);
+    document.body.classList.toggle('offline', !!(cfg.network && network && !network.online));
     render();
   });
   window.overlay.onSelected((next) => {
@@ -275,7 +352,11 @@
     root.addEventListener('click', (e) => { if (e.target.closest('.d-close')) window.overlay.select(null); });
   } else {
     window.overlay.onLoading(() => document.body.classList.add('loading'));
-    window.overlay.onVertical((v) => document.body.classList.toggle('vertical', v));
+    window.overlay.onNetwork((n) => {
+      network = n;
+      document.body.classList.toggle('offline', !!(cfg.network && n && !n.online));
+      render();
+    });
 
     // Drag to move, click a ring to open its details, click elsewhere on the card to close them.
     let drag = null;
@@ -299,6 +380,8 @@
       if (!drag) return;
       if (drag.moving) {
         window.overlay.dragEnd();
+      } else if (drag.target.closest('.more')) {
+        window.overlay.openSettings();
       } else {
         const r = drag.target.closest('.ring');
         const next = r && { svc: r.dataset.svc, index: Number(r.dataset.index) };
@@ -308,8 +391,9 @@
       drag = null;
       document.body.classList.remove('dragging');
     });
-    root.addEventListener('dblclick', (e) => { if (!e.target.closest('.ring')) window.overlay.refresh(); });
-    root.addEventListener('contextmenu', (e) => { e.preventDefault(); window.overlay.menu(); });
+    root.addEventListener('dblclick', (e) => { if (!e.target.closest('.ring, .more')) window.overlay.refresh(); });
+    // Right-click opens the app window, where all the settings and actions are.
+    root.addEventListener('contextmenu', (e) => { e.preventDefault(); window.overlay.openSettings(); });
   }
 </script>
 </body>

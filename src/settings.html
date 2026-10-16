@@ -1,0 +1,543 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self'">
+<title>Settings</title>
+<style>
+  :root {
+    --bg: #111318;
+    --surface: #171a21;
+    --surface-2: #1d2029;
+    --hover: rgba(255, 255, 255, .05);
+    --line: rgba(255, 255, 255, .07);
+    --line-2: rgba(255, 255, 255, .12);
+    --text: #eceef2;
+    --muted: #8b90a0;
+    --faint: #5d6272;
+    --accent: #8b9cff;
+    --ok: #4ade80;
+    --warn: #fbbf24;
+    --bad: #f87171;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; }
+  body {
+    display: flex; flex-direction: column;
+    background: var(--bg);
+    font: 13px/1.4 "Segoe UI", "Leelawadee UI", Tahoma, system-ui, sans-serif;
+    color: var(--text);
+    user-select: none;
+    overflow: hidden;
+  }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  button:focus-visible, input:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent); outline-offset: 2px; }
+
+  /* ---------- title bar (the window has no frame) ---------- */
+  .titlebar {
+    flex: none; height: 46px;
+    display: flex; align-items: center; gap: 10px;
+    padding: 0 8px 0 16px;
+    -webkit-app-region: drag;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, rgba(255, 255, 255, .025), transparent);
+  }
+  .titlebar img { width: 20px; height: 20px; }
+  .titlebar h1 { font-size: 13px; font-weight: 600; }
+  .titlebar .app { color: var(--muted); font-weight: 400; }
+  .tb-btn {
+    -webkit-app-region: no-drag;
+    margin-left: auto; width: 32px; height: 30px; border: 0; border-radius: 8px;
+    background: transparent; color: var(--muted);
+    display: grid; place-items: center;
+    transition: background .12s, color .12s;
+  }
+  .tb-btn:hover { background: rgba(248, 113, 113, .16); color: #fff; }
+
+  /* ---------- content ---------- */
+  main { flex: 1; overflow-y: auto; padding: 6px 16px 18px; scrollbar-gutter: stable; }
+  main::-webkit-scrollbar { width: 10px; }
+  main::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, .1); border-radius: 10px; border: 3px solid var(--bg); }
+  main::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, .18); }
+
+  section { margin-top: 18px; }
+  .sec-head { display: flex; align-items: baseline; gap: 8px; margin: 0 4px 8px; }
+  h2 { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .sec-hint { color: var(--faint); font-size: 11.5px; margin: -4px 4px 10px; }
+
+  .group { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+  .row { display: flex; align-items: center; gap: 14px; padding: 12px 14px; min-height: 52px; }
+  .row + .row { border-top: 1px solid var(--line); }
+  .row-text { flex: 1; min-width: 0; }
+  .row-title { font-weight: 500; }
+  .row-hint { color: var(--muted); font-size: 11.5px; margin-top: 1px; }
+  .row-icon { flex: none; width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; background: var(--surface-2); color: var(--muted); }
+
+  /* segmented control */
+  .seg { display: inline-flex; padding: 3px; gap: 2px; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; }
+  .seg button {
+    border: 0; background: transparent; color: var(--muted);
+    padding: 5px 12px; border-radius: 7px; font-size: 12.5px; font-weight: 500;
+    display: inline-flex; align-items: center; gap: 6px;
+    transition: background .15s, color .15s, box-shadow .15s;
+  }
+  .seg button:hover { color: var(--text); }
+  .seg button[aria-pressed="true"] { background: var(--surface-2); color: var(--text); box-shadow: 0 1px 0 rgba(255, 255, 255, .06) inset, 0 1px 3px rgba(0, 0, 0, .35); }
+
+  /* switch */
+  .switch {
+    --on: var(--accent);
+    flex: none; position: relative; width: 38px; height: 22px; border: 0; border-radius: 22px; padding: 0;
+    background: rgba(255, 255, 255, .14);
+    transition: background .18s;
+  }
+  .switch::after {
+    content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%;
+    background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .4);
+    transition: transform .18s cubic-bezier(.3, 1.4, .5, 1);
+  }
+  .switch[aria-checked="true"] { background: var(--on); }
+  .switch[aria-checked="true"]::after { transform: translateX(16px); }
+  .switch:disabled { opacity: .4; cursor: default; }
+
+  /* opacity slider */
+  .slider { display: flex; align-items: center; gap: 10px; }
+  .slider output { width: 38px; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; }
+  input[type="range"] {
+    -webkit-appearance: none; appearance: none; width: 140px; height: 6px; border-radius: 6px; cursor: pointer;
+    background: linear-gradient(90deg, var(--accent) var(--p, 50%), rgba(255, 255, 255, .12) var(--p, 50%));
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%;
+    background: #fff; border: 0; box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 25%, transparent), 0 1px 3px rgba(0, 0, 0, .5);
+  }
+
+  /* internet status preview */
+  .net-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums;
+    padding: 3px 9px; border-radius: 20px;
+    color: var(--ok); background: color-mix(in srgb, var(--ok) 13%, transparent);
+  }
+  .net-pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 6px currentColor; }
+  .net-pill.off { color: var(--bad); background: color-mix(in srgb, var(--bad) 14%, transparent); }
+  .net-pill[hidden] { display: none; }
+
+  /* ---------- services ---------- */
+  .services { display: grid; gap: 10px; }
+  .svc {
+    position: relative;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+    padding: 12px 14px 12px 14px;
+    transition: border-color .15s, opacity .15s;
+  }
+  .svc.on { border-color: color-mix(in srgb, var(--c) 28%, var(--line)); }
+  .svc.on::before {
+    content: ""; position: absolute; left: -1px; top: 14px; bottom: 14px; width: 3px; border-radius: 0 3px 3px 0;
+    background: var(--c); box-shadow: 0 0 10px color-mix(in srgb, var(--c) 60%, transparent);
+  }
+  .svc-head { display: flex; align-items: center; gap: 11px; }
+  .logo {
+    flex: none; width: 32px; height: 32px; border-radius: 10px;
+    display: grid; place-items: center;
+    font-weight: 700; font-size: 14px;
+    color: var(--c); background: color-mix(in srgb, var(--c) 16%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--c) 25%, transparent);
+  }
+  .svc:not(.on) .logo { filter: grayscale(.9); opacity: .55; }
+  .svc-name { font-weight: 600; font-size: 13.5px; display: flex; align-items: center; gap: 7px; }
+  .plan {
+    font-size: 9.5px; font-weight: 700; letter-spacing: .06em;
+    color: var(--c); background: color-mix(in srgb, var(--c) 15%, transparent);
+    padding: 1px 6px; border-radius: 5px;
+  }
+  .status { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--muted); margin-top: 1px; }
+  .status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--faint); }
+  .status.ok::before { background: var(--ok); box-shadow: 0 0 5px var(--ok); }
+  .status.err { color: var(--warn); }
+  .status.err::before { background: var(--warn); }
+  .svc .switch { --on: var(--c); margin-left: auto; }
+
+  .svc-body { margin: 11px 0 0 43px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px 4px 7px; border-radius: 9px;
+    border: 1px solid var(--line-2); background: transparent;
+    font-size: 12px; color: var(--muted);
+    transition: background .12s, border-color .12s, color .12s;
+  }
+  .chip:hover { background: var(--hover); color: var(--text); }
+  .chip .box {
+    width: 15px; height: 15px; border-radius: 5px; display: grid; place-items: center;
+    border: 1.5px solid var(--faint); transition: background .12s, border-color .12s;
+  }
+  .chip .box svg { opacity: 0; transition: opacity .12s; }
+  .chip[aria-pressed="true"] { color: var(--text); border-color: color-mix(in srgb, var(--c) 45%, transparent); background: color-mix(in srgb, var(--c) 10%, transparent); }
+  .chip[aria-pressed="true"] .box { background: var(--c); border-color: var(--c); }
+  .chip[aria-pressed="true"] .box svg { opacity: 1; }
+  .chip .pct { font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .chip:disabled { opacity: .45; cursor: default; }
+  .chip:disabled:hover { background: transparent; color: var(--muted); }
+  .note { color: var(--faint); font-size: 11.5px; }
+  .note.err { color: var(--warn); }
+  .note code { font: 11px Consolas, "Cascadia Mono", monospace; color: var(--muted); background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+
+  /* ---------- footer ---------- */
+  .actions { display: flex; gap: 8px; margin-top: 20px; }
+  .btn {
+    flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+    padding: 9px 12px; border-radius: 10px; border: 1px solid var(--line-2);
+    background: var(--surface); font-weight: 500; font-size: 12.5px;
+    transition: background .12s, border-color .12s, transform .08s;
+  }
+  .btn:hover { background: var(--surface-2); border-color: rgba(255, 255, 255, .18); }
+  .btn:active { transform: translateY(1px); }
+  .btn svg { color: var(--muted); }
+  .actions.second { margin-top: 8px; }
+
+  /* updates row */
+  .mini {
+    flex: none; padding: 6px 12px; border-radius: 8px; font-size: 12px; font-weight: 600;
+    border: 1px solid var(--line-2); background: var(--surface-2);
+    transition: background .12s, filter .12s;
+  }
+  .mini:hover { background: #252937; }
+  .mini.primary { border: 0; color: #fff; background: linear-gradient(135deg, var(--accent), #b38bff); box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 35%, transparent); }
+  .mini.primary:hover { filter: brightness(1.1); }
+  .mini[hidden] { display: none; }
+  .upd-icon.new { color: #fff; background: linear-gradient(135deg, var(--accent), #b38bff); }
+  .upd-icon.spin svg { animation: spin 1s linear infinite; }
+  .upd-bar { height: 4px; margin-top: 6px; border-radius: 4px; background: rgba(255, 255, 255, .09); overflow: hidden; }
+  .upd-bar i { display: block; height: 100%; width: var(--p, 0%); border-radius: 4px; background: linear-gradient(90deg, var(--accent), #b38bff); transition: width .25s; }
+  #upd-hint.err { color: var(--warn); }
+  .btn.danger { color: var(--bad); }
+  .btn.danger svg { color: currentColor; }
+  .btn.danger:hover { background: color-mix(in srgb, var(--bad) 12%, var(--surface)); border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
+  .btn.spin svg { animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .about { display: flex; align-items: center; gap: 8px; margin: 16px 4px 0; color: var(--faint); font-size: 11.5px; }
+  .about .sp { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; }
+  kbd {
+    font: 10.5px Consolas, "Cascadia Mono", monospace; color: var(--muted);
+    padding: 1px 5px; border-radius: 4px; background: var(--surface-2); border: 1px solid var(--line-2); border-bottom-width: 2px;
+  }
+</style>
+</head>
+<body>
+<header class="titlebar">
+  <img src="icon.png" alt="">
+  <h1><span data-t="s.title"></span> <span class="app">· Ai Quota Overlay</span></h1>
+  <button class="tb-btn" id="close" aria-label="Close">
+    <svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 2l8 8M10 2l-8 8"/></svg>
+  </button>
+</header>
+
+<main>
+  <section>
+    <div class="sec-head"><h2 data-t="s.general"></h2></div>
+    <div class="group">
+      <div class="row">
+        <div class="row-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></div>
+        <div class="row-text"><div class="row-title" data-t="s.showOverlay"></div><div class="row-hint" data-t="s.showOverlayHint"></div></div>
+        <button class="switch" role="switch" id="visible"></button>
+      </div>
+      <div class="row">
+        <div class="row-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg></div>
+        <div class="row-text"><div class="row-title" data-t="s.language"></div></div>
+        <div class="seg" id="lang"></div>
+      </div>
+      <div class="row">
+        <div class="row-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="3" y="8" width="11" height="8" rx="2"/><rect x="17" y="3" width="4" height="18" rx="1.5"/></svg></div>
+        <div class="row-text"><div class="row-title" data-t="s.layout"></div></div>
+        <div class="seg" id="layout">
+          <button data-v="h"><svg width="14" height="10" viewBox="0 0 14 10" fill="none" stroke="currentColor" stroke-width="1.5"><rect x=".75" y=".75" width="12.5" height="8.5" rx="2"/></svg><span data-t="s.horizontal"></span></button>
+          <button data-v="v"><svg width="10" height="14" viewBox="0 0 10 14" fill="none" stroke="currentColor" stroke-width="1.5"><rect x=".75" y=".75" width="8.5" height="12.5" rx="2"/></svg><span data-t="s.vertical"></span></button>
+        </div>
+      </div>
+      <div class="row">
+        <div class="row-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"/></svg></div>
+        <div class="row-text"><div class="row-title" data-t="s.opacity"></div></div>
+        <div class="slider"><input type="range" id="opacity" min="50" max="100" step="1"><output id="opacity-val"></output></div>
+      </div>
+      <div class="row" id="startup-row">
+        <div class="row-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 3v8M7.5 6.3a7 7 0 1 0 9 0"/></svg></div>
+        <div class="row-text"><div class="row-title" data-t="s.startup"></div><div class="row-hint" data-t="s.startupHint"></div></div>
+        <button class="switch" role="switch" id="startup"></button>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2 data-t="s.network"></h2></div>
+    <div class="group">
+      <div class="row">
+        <div class="row-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M2.5 9a14 14 0 0 1 19 0M6 12.8a9 9 0 0 1 12 0M9.3 16.4a4.4 4.4 0 0 1 5.4 0"/><circle cx="12" cy="19.6" r="1.2" fill="currentColor" stroke="none"/></svg></div>
+        <div class="row-text"><div class="row-title" data-t="s.networkShow"></div><div class="row-hint" data-t="s.networkHint"></div></div>
+        <span class="net-pill" id="net-pill" hidden></span>
+        <button class="switch" role="switch" id="network"></button>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2 data-t="s.services"></h2></div>
+    <p class="sec-hint" data-t="s.servicesHint"></p>
+    <div class="services" id="services"></div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2 data-t="u.section"></h2></div>
+    <div class="group">
+      <div class="row" id="upd-row">
+        <div class="row-icon upd-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17V7M7.5 11.5 12 7l4.5 4.5"/><circle cx="12" cy="12" r="9.5"/></svg></div>
+        <div class="row-text"><div class="row-title" id="upd-title"></div><div class="row-hint" id="upd-hint"></div></div>
+        <button class="mini" id="upd-btn"></button>
+      </div>
+    </div>
+  </section>
+
+  <div class="actions">
+    <button class="btn" id="refresh"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg><span data-t="s.refresh"></span></button>
+    <button class="btn" id="snap"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><rect x="12" y="12" width="6" height="6" rx="1" fill="currentColor" stroke="none"/></svg><span data-t="s.snap"></span></button>
+  </div>
+  <div class="actions second">
+    <button class="btn" id="restart"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 13a8 8 0 1 0 2.3-5.7M4 4v5h5"/></svg><span data-t="s.restart"></span></button>
+    <button class="btn danger" id="quit"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3v8M7.5 6.3a7 7 0 1 0 9 0"/></svg><span data-t="s.quit"></span></button>
+  </div>
+
+  <div class="about">
+    <span id="version"></span><span id="updated"></span>
+    <span class="sp"><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>Q</kbd>&nbsp;<span data-t="s.shortcut"></span></span>
+  </div>
+</main>
+
+<script src="i18n.js"></script>
+<script>
+  const SERVICES = [
+    { key: 'claude', name: 'Claude', color: '#d97757' },
+    { key: 'codex', name: 'Codex', color: '#10a37f' },
+    { key: 'cursor', name: 'Cursor', color: '#a5b4fc' },
+  ];
+  // A small quota ring in the service's colour, like the ones on the card.
+  const LOGO = '<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke-width="3" stroke-linecap="round"><circle cx="9" cy="9" r="6.5" stroke="currentColor" opacity=".25"/><path d="M9 2.5a6.5 6.5 0 1 1-6.2 8.5" stroke="currentColor"/></svg>';
+  const CHECK ='<svg width="9" height="9" viewBox="0 0 10 10" fill="none" stroke="#111318" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1.8 5.2l2.2 2.2 4.2-4.6"/></svg>';
+
+  let cfg = null;      // settings from main (publicSettings)
+  let data = null;     // last quota fetch
+  let network = null;  // { online, ms } or null
+  let update = null;   // updater state (see src/updater.js)
+  const T = () => I18N.t(cfg?.lang);
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const color = (left) => (left > 50 ? 'var(--ok)' : left > 20 ? 'var(--warn)' : 'var(--bad)');
+  const lookup = (key) => key.split('.').reduce((o, k) => o?.[k], T());
+
+  // Static text: every [data-t] holds a key into the strings of the current language.
+  function applyTexts() {
+    document.documentElement.lang = cfg.lang;
+    document.title = T().s.title;
+    for (const el of document.querySelectorAll('[data-t]')) el.textContent = lookup(el.dataset.t) ?? '';
+    $('lang').innerHTML = I18N.LANGS.map((l) => `<button data-v="${l.key}">${esc(l.name)}</button>`).join('');
+  }
+
+  function renderGeneral() {
+    for (const b of $('lang').children) b.setAttribute('aria-pressed', b.dataset.v === cfg.lang);
+    for (const b of $('layout').children) b.setAttribute('aria-pressed', (b.dataset.v === 'v') === !!cfg.vertical);
+    const slider = $('opacity');
+    if (document.activeElement !== slider) slider.value = Math.round(cfg.opacity * 100);
+    paintSlider();
+    $('startup-row').hidden = !cfg.canStartAtLogin;
+    $('startup').setAttribute('aria-checked', !!cfg.startup);
+    $('visible').setAttribute('aria-checked', !!cfg.visible);
+    $('network').setAttribute('aria-checked', !!cfg.network);
+    $('version').textContent = `v${cfg.version}`;
+    renderNetwork();
+  }
+
+  function paintSlider() {
+    const s = $('opacity');
+    s.style.setProperty('--p', `${((s.value - s.min) / (s.max - s.min)) * 100}%`);
+    $('opacity-val').textContent = `${s.value}%`;
+  }
+
+  function renderNetwork() {
+    const pill = $('net-pill');
+    pill.hidden = !cfg.network || !network;
+    if (pill.hidden) return;
+    pill.classList.toggle('off', !network.online);
+    pill.textContent = network.online ? `${network.ms} ms` : T().offline;
+  }
+
+  function renderUpdated() {
+    if (!data?.fetchedAt) return;
+    const time = new Date(data.fetchedAt).toLocaleTimeString(T().locale, { hour: '2-digit', minute: '2-digit' });
+    $('updated').textContent = ` · ${T().s.updated(time)}`;
+  }
+
+  // One card per service: switch it on/off, and pick which of its quota windows show on the card.
+  function renderServices() {
+    const t = T();
+    $('services').innerHTML = SERVICES.map((s) => {
+      const on = cfg.services[s.key] !== false;
+      const r = on ? data?.[s.key] : null;
+      const hidden = cfg.hidden[s.key] ?? [];
+
+      let status;
+      if (!on) status = `<span class="status">${esc(t.s.disabled)}</span>`;
+      else if (!r) status = `<span class="status">${esc(t.s.checking)}</span>`;
+      else if (r.absent) status = `<span class="status">${esc(t.s.absent)}</span>`;
+      else if (!r.ok) status = `<span class="status err">${esc(t.s.failed)}</span>`;
+      else status = `<span class="status ok">${esc(t.s.connected)}</span>`;
+      const plan = r?.ok && r.plan ? `<span class="plan">${esc(r.plan.toUpperCase())}</span>` : '';
+
+      // Live windows when there are some, else the ones seen last time (greyed out while the service is off).
+      const wins = r?.ok && r.windows.length ? r.windows : cfg.seen[s.key] ?? [];
+      let body = '';
+      if (on && r?.absent) {
+        body = `<p class="note">${esc(t.s.login[s.key])}</p>`;
+      } else if (wins.length) {
+        if (on && r && !r.ok) body += `<p class="note err" style="margin-bottom:8px">${esc(I18N.errorText(r.error, cfg.lang))}</p>`;
+        body += `<div class="chips">${wins.map((w) => {
+          const shown = !hidden.includes(w.id);
+          const pct = typeof w.usedPercent === 'number'
+            ? `<span class="pct" style="color:${color(100 - w.usedPercent)}">${Math.round(100 - w.usedPercent)}%</span>` : '';
+          return `<button class="chip" data-svc="${s.key}" data-id="${esc(w.id)}" aria-pressed="${shown}" ${on ? '' : 'disabled'}>
+            <span class="box">${CHECK}</span>${esc(I18N.windowLabel(w, cfg.lang))}${pct}</button>`;
+        }).join('')}</div>`;
+      } else if (on && r && !r.ok) {
+        body = `<p class="note err">${esc(I18N.errorText(r.error, cfg.lang))}</p>`;
+      } else {
+        body = `<p class="note">${esc(on ? t.s.windowsPending : t.s.windowsOff)}</p>`;
+      }
+
+      return `<div class="svc${on ? ' on' : ''}" style="--c:${s.color}">
+        <div class="svc-head">
+          <div class="logo">${LOGO}</div>
+          <div><div class="svc-name">${s.name}${plan}</div>${status}</div>
+          <button class="switch" role="switch" data-svc="${s.key}" aria-checked="${on}" aria-label="${s.name}"></button>
+        </div>
+        <div class="svc-body">${body}</div>
+      </div>`;
+    }).join('');
+  }
+
+  // One row: where updates stand, and the one button that moves them along.
+  function renderUpdate() {
+    if (!cfg || !update) return;
+    const t = T().u;
+    const u = update;
+    const icon = document.querySelector('.upd-icon');
+    const btn = $('upd-btn');
+    let title = t.current(u.current);
+    let hint = '';
+    let action = 'check';
+    let label = t.check;
+    let err = false;
+    switch (u.phase) {
+      case 'unsupported': hint = esc(t.devOnly); action = null; break;
+      case 'checking': hint = esc(t.checking); action = null; break;
+      case 'latest': title = t.upToDate(u.current); break;
+      case 'available':
+        title = u.skipped ? t.skipped(u.version) : t.ready(u.version);
+        hint = esc(u.manual ? t.manualHint : t.fromTo(u.current, u.version));
+        action = 'download';
+        label = u.manual ? t.download : t.update;
+        break;
+      case 'downloading':
+        title = t.downloading(u.version);
+        hint = `${u.percent ?? 0}%<div class="upd-bar" style="--p:${u.percent ?? 0}%"><i></i></div>`;
+        action = null;
+        break;
+      case 'installing': title = t.installing(u.version); hint = esc(t.restartNote); action = null; break;
+      case 'error':
+        err = true;
+        hint = esc(`${u.error?.during === 'download' ? t.failed : t.checkFailed} — ${u.error?.message ?? ''}`);
+        action = u.error?.during === 'download' ? 'download' : 'check';
+        label = u.error?.during === 'download' ? t.retry : t.check;
+        break;
+    }
+    $('upd-title').textContent = title;
+    $('upd-hint').innerHTML = hint;
+    $('upd-hint').classList.toggle('err', err);
+    icon.classList.toggle('new', ['available', 'downloading', 'installing'].includes(u.phase));
+    icon.classList.toggle('spin', u.phase === 'checking' || u.phase === 'installing');
+    btn.hidden = !action;
+    btn.dataset.a = action ?? '';
+    btn.textContent = label;
+    btn.classList.toggle('primary', action === 'download');
+  }
+
+  function renderAll() {
+    if (!cfg) return;
+    applyTexts();
+    renderGeneral();
+    renderServices();
+    renderUpdated();
+    renderUpdate();
+  }
+
+  // ---------- events ----------
+  window.overlay.onSettings((next) => {
+    const langChanged = cfg?.lang !== next.lang;
+    cfg = next;
+    if (langChanged) return renderAll();
+    renderGeneral();
+    renderServices();
+  });
+  window.overlay.onQuota((d) => {
+    data = d;
+    $('refresh').classList.remove('spin');
+    if (!cfg) return;
+    renderServices();
+    renderUpdated();
+  });
+  window.overlay.onNetwork((n) => {
+    network = n;
+    if (cfg) renderNetwork();
+  });
+  window.overlay.onUpdate((u) => {
+    update = u;
+    renderUpdate();
+  });
+  $('upd-btn').addEventListener('click', (e) => {
+    if (e.currentTarget.dataset.a) window.overlay.update(e.currentTarget.dataset.a);
+  });
+
+  const toggle = (el) => el.getAttribute('aria-checked') !== 'true';
+  $('close').addEventListener('click', () => window.close());
+  $('lang').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (b) window.overlay.set('lang', b.dataset.v);
+  });
+  $('layout').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (b) window.overlay.set('vertical', b.dataset.v === 'v');
+  });
+  $('opacity').addEventListener('input', (e) => {
+    paintSlider();
+    window.overlay.set('opacity', e.target.value / 100);
+  });
+  $('startup').addEventListener('click', (e) => window.overlay.set('startup', toggle(e.currentTarget)));
+  $('network').addEventListener('click', (e) => window.overlay.set('network', toggle(e.currentTarget)));
+  $('services').addEventListener('click', (e) => {
+    const sw = e.target.closest('.switch');
+    if (sw) return window.overlay.set('service', { svc: sw.dataset.svc, on: toggle(sw) });
+    const chip = e.target.closest('.chip');
+    if (chip && !chip.disabled) {
+      window.overlay.set('window', { svc: chip.dataset.svc, id: chip.dataset.id, on: chip.getAttribute('aria-pressed') !== 'true' });
+    }
+  });
+  $('refresh').addEventListener('click', (e) => {
+    e.currentTarget.classList.add('spin');
+    window.overlay.refresh();
+  });
+  $('snap').addEventListener('click', () => window.overlay.snap());
+  $('visible').addEventListener('click', (e) => window.overlay.set('visible', toggle(e.currentTarget)));
+  $('restart').addEventListener('click', () => window.overlay.restart());
+  $('quit').addEventListener('click', () => window.overlay.quit());
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') window.close(); });
+</script>
+</body>
+</html>
