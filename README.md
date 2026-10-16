@@ -33,6 +33,7 @@
 - ⚡ **อัปเดตไว แต่ไม่รัว** — โควต้าทุก 1 นาที (ซ่อนอยู่ทุก 5 นาที), ไม่ยิงซ้อนกัน, โดน 429 จะพักเจ้านั้น 2 → 15 นาทีแล้วโชว์ตัวเลขล่าสุดไว้ก่อน
 - 🎮 **ไม่บังงาน** — ลอยบนสุด, ไม่แย่ง focus, กินที่แค่ตัวกล่อง
 - 🔒 **ไม่ต้องใส่รหัสอะไร** — ใช้ login ที่แอปของแต่ละเจ้ามีอยู่แล้วในเครื่อง
+- 🪶 **เบามาก** — เขียนด้วย Rust วาดเองทั้งหมด ไม่มี browser/webview ข้างใน: ตัวติดตั้ง Windows ~1.4 MB (เดิม 94 MB), RAM ~25 MB, CPU แทบ 0% ตอนว่าง
 
 ## 📥 ดาวน์โหลด
 
@@ -46,11 +47,12 @@
 | 🐧 **Linux** (ทุก distro) | `AiQuotaOverlay-x.y.z-linux-x86_64.AppImage` |
 | 🐧 **Ubuntu / Debian** | `AiQuotaOverlay-x.y.z-linux-amd64.deb` |
 
-<details>
-<summary><b>เปิดครั้งแรกแล้วโดนเตือน? (แอปยังไม่ได้ code-sign)</b></summary>
+ตัว Windows sign ด้วยใบรับรอง code signing แล้ว ใช้ Electron เวอร์ชันเก่า (1.2.0) อยู่ แอปจะเตือนอัปเดตให้เอง กด Update ได้เลย ระบบจะเปลี่ยนเป็นตัวใหม่ในโฟลเดอร์เดิม และ settings เดิมยังอยู่ครบ
 
-- **Windows** — SmartScreen ขึ้น "Windows protected your PC" → กด **More info → Run anyway**
-- **macOS** — ลากแอปไปไว้ใน Applications แล้วรันใน Terminal ครั้งเดียว:
+<details>
+<summary><b>macOS / Linux เปิดครั้งแรกแล้วโดนเตือน?</b></summary>
+
+- **macOS** (ยังไม่ได้ sign) — ลากแอปไปไว้ใน Applications แล้วรันใน Terminal ครั้งเดียว:
   ```bash
   xattr -cr "/Applications/Ai Quota Overlay.app"
   ```
@@ -180,62 +182,54 @@ QUOTA_OVERLAY_SERVICES=claude,codex
 
 | อยากเปลี่ยน | แก้ที่ |
 |---|---|
-| ขนาดทั้งหมด (ตอนนี้ 120%) | `SCALE` ใน [`src/main.js`](src/main.js) |
-| ความถี่ในการเช็คโควต้า (ตอนนี้ 1 นาที, ซ่อนอยู่ 5 นาที) / เน็ต (3 วินาที) | `POLL_MS` · `IDLE_POLL_MS` · `NET_MS` ใน [`src/main.js`](src/main.js) |
-| ความถี่ในการเช็คอัปเดต (ตอนนี้ 15 นาที) | `CHECK_EVERY_MS` ใน [`src/updater.js`](src/updater.js) |
-| ระยะห่างจากขอบจอตอน Snap | `MARGIN` ใน [`src/main.js`](src/main.js) |
-| คีย์ลัดซ่อน/แสดง | `globalShortcut.register('Control+Alt+Q', …)` ใน [`src/main.js`](src/main.js) |
-| สีเขียว/เหลือง/แดง, พื้นหลัง, ตัวอักษร | ตัวแปร CSS ใน `:root` ของ [`src/index.html`](src/index.html) |
-| เกณฑ์สี (50% / 20%) | ฟังก์ชัน `color()` ใน [`src/index.html`](src/index.html) |
-| สีประจำบริการ | `SERVICES` ใน [`src/index.html`](src/index.html) |
-| ข้อความ EN / TH, เพิ่มภาษาใหม่ | [`src/i18n.js`](src/i18n.js) — เพิ่มชุดข้อความใน `STRINGS` และใส่ใน `LANGS` |
-| หน้าตั้งค่า | [`src/settings.html`](src/settings.html) |
-| เพิ่มบริการใหม่ | [`src/quota.js`](src/quota.js) — เขียน `fetchXxx()` ที่คืน `{ plan, windows: [{ id, span, usedPercent, resetsAt }] }` (`span` = วินาที) แล้วใส่ใน `FETCHERS` |
-| ไอคอน | `npm run icon` (วาดใหม่จาก [`scripts/make-icon.js`](scripts/make-icon.js)) |
+| ขนาดทั้งหมด (ตอนนี้ 120%) | `SCALE` ใน [`src/app.rs`](src/app.rs) |
+| ความถี่ในการเช็คโควต้า (ตอนนี้ 1 นาที, ซ่อนอยู่ 5 นาที) / เน็ต (3 วินาที) | `POLL` · `IDLE_POLL` · `NET_EVERY` ใน [`src/app.rs`](src/app.rs) |
+| ความถี่ในการเช็คอัปเดต (ตอนนี้ 15 นาที) | `CHECK_EVERY` ใน [`src/updater.rs`](src/updater.rs) |
+| ระยะห่างจากขอบจอตอน Snap | `MARGIN` ใน [`src/app.rs`](src/app.rs) |
+| คีย์ลัดซ่อน/แสดง | `RegisterHotKey` ใน [`src/platform/windows.rs`](src/platform/windows.rs) · `HotKey::new` ใน [`src/platform/unix.rs`](src/platform/unix.rs) |
+| สีเขียว/เหลือง/แดง, พื้นหลัง, ตัวอักษร | ค่าคงที่สีใน [`src/ui/mod.rs`](src/ui/mod.rs) |
+| เกณฑ์สี (50% / 20%) | `level_color()` ใน [`src/ui/mod.rs`](src/ui/mod.rs) |
+| สีประจำบริการ | `svc_color()` ใน [`src/ui/mod.rs`](src/ui/mod.rs) |
+| ข้อความ EN / TH | [`src/i18n.rs`](src/i18n.rs) |
+| กล่อง / กล่องรายละเอียด / toast อัปเดต / หน้าแอป | [`src/ui/card.rs`](src/ui/card.rs) · [`panel.rs`](src/ui/panel.rs) · [`toast.rs`](src/ui/toast.rs) · [`app_window.rs`](src/ui/app_window.rs) |
+| เพิ่มบริการใหม่ | [`src/quota/`](src/quota) — เขียน fetcher ที่คืน `Quota { plan, windows: [Win { id, span, used_percent, resets_at }] }` (`span` = วินาที) แล้วใส่ใน `fetch_all` |
 
 ## 🛠️ พัฒนา
 
-ต้องมี **Node.js 22** (Node 24 แตกไฟล์ Electron ไม่ครบ — ดูด้านล่าง)
+ต้องมี [Rust](https://rustup.rs) (stable) — แค่นั้น ไม่มี Node / Electron แล้ว
 
 ```bash
 git clone git@github.com:artmasster/ai_quota_overlay.git
 cd ai_quota_overlay
-npm install
-npm start
+cargo run
 ```
+
+| ระบบ | ต้องมีเพิ่ม |
+|---|---|
+| Windows | toolchain MSVC (Visual Studio Build Tools) **หรือ** `stable-x86_64-pc-windows-gnu` + [WinLibs](https://winlibs.com) (`winget install BrechtSanders.WinLibs.POSIX.MSVCRT`) ใน `PATH` |
+| macOS | Xcode Command Line Tools |
+| Linux | `build-essential` (X11 libs โหลดตอนรัน: libx11, libxcursor, libxrandr, libxi, libxkbcommon-x11) |
 
 | คำสั่ง | ทำอะไร |
 |---|---|
-| `npm start` | รันจากซอร์ส (Windows ดับเบิลคลิก `start-overlay.vbs` ได้ ไม่มีหน้าต่าง console) |
-| `npm run check` | พิมพ์ข้อมูลโควต้าที่แอปเห็น โดยไม่เปิดหน้าต่าง |
-| `npm run dist` | build ตัวติดตั้งของเครื่องที่ใช้อยู่ลง `dist/` (`dist:win` · `dist:mac` · `dist:linux`) |
-| `npx electron scripts/screenshots.js` | ถ่ายภาพตัวอย่างใน `docs/` ใหม่ด้วยข้อมูลจำลอง |
-| `QUOTA_OVERLAY_SNAPSHOT=out.png npm start` | ถ่ายภาพ overlay จริงหลังโหลดเสร็จแล้วปิดตัว |
-| `QUOTA_OVERLAY_FAKE_UPDATE=1.9.0 npm start` | จำลองว่ามี v1.9.0 ออก — ลองกล่องอัปเดต / ข้าม / แถบดาวน์โหลด ได้ครบโดยไม่ติดตั้งจริง |
+| `cargo run` | รันจากซอร์ส |
+| `cargo test` | เทสต์ (ตัวดึงข้อมูล, ตัวอ่าน SQLite, settings, updater) — ไม่ใช้เน็ต ไม่ใช้ login จริง |
+| `cargo run -- --screenshots docs` | ถ่ายภาพตัวอย่างใน `docs/` ใหม่ด้วยข้อมูลจำลอง (ทุกสถานะ EN/TH) |
+| `python -I scripts/compare.py <เก่า> <ใหม่> <ผล>` | วางภาพเทียบ เก่า \| ใหม่ \| ส่วนต่าง |
+| `QUOTA_OVERLAY_SNAPSHOT=out.png cargo run` | ถ่ายภาพ overlay จริงหลังโหลดเสร็จแล้วปิดตัว |
+| `QUOTA_OVERLAY_FAKE_UPDATE=9.9.0 cargo run` | จำลองว่ามี v9.9.0 ออก — ลองกล่องอัปเดต / ข้าม / แถบดาวน์โหลด ได้ครบโดยไม่ติดตั้งจริง |
+| `QUOTA_OVERLAY_DATA_DIR=<โฟลเดอร์>` | เก็บ settings ที่อื่น (ไม่ทับของจริง) |
+| `QUOTA_OVERLAY_LOG_REQUESTS=<ไฟล์>` | บันทึกเวลา + URL ของทุก request (ไม่มี header/token) ไว้ตรวจจังหวะการเช็ค |
 
 ### ออก release
 
-push tag ที่ขึ้นต้นด้วย `v` แล้ว GitHub Actions จะ build Windows / macOS / Linux และสร้าง Release ให้เอง
-(Release ต้องมี `latest.yml` / `latest-linux.yml` และ `*.blockmap` ติดไปด้วย — workflow อัปโหลดให้แล้ว — แอปที่ติดตั้งอยู่ถึงจะเห็นอัปเดต)
+1. แก้ `version` ใน `Cargo.toml` แล้ว push tag `v<version>` — GitHub Actions จะ build ทั้ง 3 ระบบ และสร้าง Release แบบ **draft** ที่มีไฟล์ macOS / Linux + `latest-linux.yml`
+2. ตัว Windows sign บนเครื่อง Siam (`ssh siam`, ใบรับรอง SSL.com eSigner): รัน `pwsh scripts/release-windows.ps1 -Publish` — build exe, sign exe / uninstaller / installer, สร้าง `latest.yml` จากไฟล์ที่ sign แล้ว, อัปโหลดเข้า draft แล้ว publish (ต้อง login `gh` ไว้)
 
-```bash
-npm version patch   # หรือ minor / major — แก้ package.json + สร้าง tag
-git push --follow-tags
-```
-
+แอปที่ติดตั้งอยู่อ่าน `latest.yml` (Windows) / `latest-linux.yml` (AppImage) แบบเดียวกับ electron-builder ตัว Electron เก่าจึงอัปเดตข้ามมาเป็นตัว Rust ได้เอง
 อยาก build ทดสอบโดยไม่ออก release: แท็บ **Actions → Release → Run workflow** ไฟล์จะอยู่ใน artifacts ของรอบนั้น
 
-<details>
-<summary><b>Node 24: <code>npm install</code> แล้ว Electron เปิดไม่ขึ้น</b></summary>
-
-ตัวแตกไฟล์ของ Electron พังเงียบๆ บน Node 24 (`node_modules/electron/dist` มีแค่ `locales/sr.pak`) ใช้ Node 22 หรือแตกเองจาก cache:
-
-```powershell
-Remove-Item node_modules\electron\dist -Recurse -Force
-Expand-Archive (Get-ChildItem $env:LOCALAPPDATA\electron\Cache -Recurse -Filter 'electron-*-win32-x64.zip')[0].FullName node_modules\electron\dist
-Set-Content node_modules\electron\path.txt 'electron.exe' -NoNewline
-```
-</details>
+ตัว Electron เดิมเก็บไว้ที่ branch [`old-electron`](https://github.com/artmasster/ai_quota_overlay/tree/old-electron)
 
 ## ❓ แก้ปัญหา
 
@@ -245,6 +239,7 @@ Set-Content node_modules\electron\path.txt 'electron.exe' -NoNewline
 | บริการที่ใช้อยู่ไม่ขึ้นเลย | ยังไม่ได้ login ในเครื่องนี้ หรือ login ด้วยวิธีอื่น (เช่น Codex ใช้ API key แทนบัญชี ChatGPT) |
 | ไม่ขึ้นทับเกม | ใช้โหมด **Borderless / Windowed** — Exclusive fullscreen ไม่มี overlay ไหนขึ้นได้ |
 | Linux: พื้นหลังดำ | หน้าต่างโปร่งใสต้องใช้ desktop ที่มี compositor |
+| Linux Wayland | แอปเปิดผ่าน XWayland (overlay ต้องกำหนดตำแหน่งเองได้ ซึ่ง Wayland ไม่ให้) — ต้องมี XWayland ในเครื่อง |
 
 ## 📄 License
 

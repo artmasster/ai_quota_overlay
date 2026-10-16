@@ -1127,3 +1127,37 @@ pub fn run(fetcher: Fetcher) {
         let _ = ReleaseMutex(mutex);
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mon(l: i32, t: i32, r: i32, b: i32, scale: f64, primary: bool) -> Mon {
+        let rc = RECT { left: l, top: t, right: r, bottom: b };
+        Mon { phys: rc, work: rc, scale, primary, dx: 0.0, dy: 0.0 }
+    }
+
+    #[test]
+    fn second_monitor_is_placed_against_the_primary_like_chromium() {
+        // 2K at 100 % plus a 4K at 125 % to its right, tops aligned (the owner's setup).
+        let mut v = vec![mon(0, 0, 2560, 1440, 1.0, true), mon(2560, 0, 6400, 2160, 1.25, false)];
+        layout_dip(&mut v);
+        assert_eq!((v[0].dx, v[0].dy), (0.0, 0.0));
+        assert_eq!((v[1].dx, v[1].dy), (2560.0, 0.0));
+        let b = v[1].dip_bounds();
+        assert_eq!((b.w, b.h), (3072.0, 1728.0));
+        // A 4K at 150 % on the left, its top 200 px lower.
+        let mut v = vec![mon(0, 0, 2560, 1440, 1.0, true), mon(-3840, 200, 0, 2360, 1.5, false)];
+        layout_dip(&mut v);
+        assert_eq!((v[1].dx, v[1].dy), (-2560.0, 200.0));
+    }
+
+    #[test]
+    fn dip_of_a_point_uses_its_monitor() {
+        let mut v = vec![mon(0, 0, 2560, 1440, 1.0, true), mon(2560, 0, 6400, 2160, 1.25, false)];
+        layout_dip(&mut v);
+        let r = v[1].dip(RECT { left: 2560 + 1250, top: 500, right: 2560 + 1500, bottom: 625 });
+        assert_eq!((r.x, r.y, r.w, r.h), (2560.0 + 1000.0, 400.0, 200.0, 100.0));
+    }
+}

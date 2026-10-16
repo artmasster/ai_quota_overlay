@@ -81,7 +81,12 @@ fn file() -> PathBuf {
 
 impl Settings {
     pub fn load() -> Self {
-        let raw = std::fs::read_to_string(file()).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok());
+        Self::parse(&std::fs::read_to_string(file()).unwrap_or_default())
+    }
+
+    /// Settings from settings.json text; anything missing or malformed falls back to the defaults.
+    pub fn parse(text: &str) -> Self {
+        let raw = serde_json::from_str::<Value>(text).ok();
         let mut s = Settings::default();
         let Some(Value::Object(mut m)) = raw else { return s };
         if let Some(v) = m.remove("card") {
@@ -179,14 +184,7 @@ mod tests {
             "services":{"claude":true,"codex":false,"cursor":true},"hidden":{"claude":["seven_day_opus"],"codex":[],"cursor":[]},
             "seen":{"claude":[{"id":"five_hour","span":18000},{"id":"seven_day_opus","span":604800,"name":"Opus"}],
             "cursor":[{"id":"billing","billing":true}]},"skipVersion":"1.3.0","futureKey":42}"#;
-        let v: Value = serde_json::from_str(raw).unwrap();
-        let path = std::env::temp_dir().join("aqo-settings-test.json");
-        std::fs::write(&path, raw).unwrap();
-        // Parse through the same code path as load().
-        let mut s = Settings::default();
-        if let Value::Object(_) = &v {
-            s = parse_for_test(raw);
-        }
+        let s = Settings::parse(raw);
         assert_eq!(s.card.unwrap().x, 2271.6);
         assert_eq!(s.lang, "th");
         assert!(!s.services[1]);
@@ -196,30 +194,21 @@ mod tests {
         assert_eq!(s.skip_version.as_deref(), Some("1.3.0"));
         let out = s.to_json();
         assert_eq!(out["futureKey"], 42);
-        assert_eq!(out["seen"]["claude"][0], serde_json::json!({"id": "five_hour", "span": 18000.0}));
+        assert_eq!(out["seen"]["claude"][0], serde_json::json!({"id": "five_hour", "span": 18000}));
         assert_eq!(out["services"]["codex"], false);
+        // JSON.stringify order: the known keys first, as Electron wrote them.
+        let text = serde_json::to_string(&out).unwrap();
+        assert!(text.starts_with(r#"{"card":{"x":2271.6,"y":1265.0,"w":296.0,"h":97.0},"opacity":0.85,"vertical":true,"lang":"th""#), "{text}");
     }
 
-    fn parse_for_test(raw: &str) -> Settings {
-        let dir = std::env::temp_dir().join(format!("aqo-test-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join(APP_NAME)).unwrap();
-        std::fs::write(dir.join(APP_NAME).join("settings.json"), raw).unwrap();
-        let var = if cfg!(windows) { "APPDATA" } else if cfg!(target_os = "macos") { "HOME" } else { "XDG_CONFIG_HOME" };
-        let old = std::env::var_os(var);
-        let base = if cfg!(target_os = "macos") {
-            let h = dir.join("home");
-            std::fs::create_dir_all(h.join("Library/Application Support").join(APP_NAME)).unwrap();
-            std::fs::write(h.join("Library/Application Support").join(APP_NAME).join("settings.json"), raw).unwrap();
-            h
-        } else {
-            dir.clone()
-        };
-        std::env::set_var(var, &base);
-        let s = Settings::load();
-        match old {
-            Some(v) => std::env::set_var(var, v),
-            None => std::env::remove_var(var),
-        }
-        s
+    #[test]
+    fn old_and_broken_files_fall_back_to_defaults() {
+        let s = Settings::parse(r#"{"card":{"x":2434,"y":761,"w":65,"h":356},"opacity":0.92,"vertical":true}"#);
+        assert_eq!(s.card.unwrap().h, Some(356.0));
+        assert!(s.vertical);
+        assert_eq!(s.lang, "en");
+        assert_eq!(s.services, [true; 3]);
+        assert_eq!(Settings::parse("not json"), Settings::default());
+        assert_eq!(Settings::parse(r#"{"lang":"fr"}"#).lang, "en");
     }
 }
