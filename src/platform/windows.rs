@@ -703,12 +703,100 @@ unsafe fn update_layered(h: HWND, x: i32, y: i32, pm: &Pixmap, alpha: f64) {
 }
 
 fn load_cursor(c: CursorKind) -> HCURSOR {
+    thread_local! {
+        static HANDS: [Cell<isize>; 2] = const { [Cell::new(0), Cell::new(0)] };
+    }
     let id = match c {
-        CursorKind::Default | CursorKind::Grab => IDC_ARROW,
+        CursorKind::Default => IDC_ARROW,
         CursorKind::Pointer => IDC_HAND,
-        CursorKind::Grabbing => IDC_SIZEALL,
+        // Windows has no open / closed hand cursors (Chromium ships its own for `cursor: grab`): draw them.
+        CursorKind::Grab | CursorKind::Grabbing => {
+            let i = (c == CursorKind::Grabbing) as usize;
+            let h = HANDS.with(|hs| {
+                if hs[i].get() == 0 {
+                    hs[i].set(hand_cursor(i == 1).0 as isize);
+                }
+                hs[i].get()
+            });
+            if h != 0 {
+                return HCURSOR(h as *mut _);
+            }
+            IDC_ARROW
+        }
     };
     unsafe { LoadCursorW(None, id).unwrap_or_default() }
+}
+
+/// An open (grab) or closed (grabbing) hand: white with a dark outline, hotspot in the palm, sized for the
+/// primary display's cursor size.
+fn hand_cursor(closed: bool) -> HCURSOR {
+    let size = unsafe { GetSystemMetrics(SM_CXCURSOR) }.clamp(32, 128) as u32;
+    let Some(pm) = hand_pixmap(closed, size) else { return HCURSOR::default() };
+    let k = size as f32 / 32.0;
+    unsafe { make_cursor(&pm, (16.0 * k) as u32, (16.0 * k) as u32) }
+}
+
+fn hand_pixmap(closed: bool, size: u32) -> Option<Pixmap> {
+    use crate::ui::gfx::{rr, R};
+    use tiny_skia::{FillRule, LineJoin, Paint, Stroke, Transform};
+    let mut pm = Pixmap::new(size, size)?;
+    let base = Transform::from_scale(size as f32 / 32.0, size as f32 / 32.0);
+    let mut black = Paint { anti_alias: true, ..Paint::default() };
+    black.set_color_rgba8(0, 0, 0, 255);
+    let mut white = Paint { anti_alias: true, ..Paint::default() };
+    white.set_color_rgba8(255, 255, 255, 255);
+    let edge = Stroke { width: 2.0, line_join: LineJoin::Round, ..Stroke::default() };
+    // Each part: dark outline, then white body, drawn back to front so the outlines separate the fingers.
+    let mut part = |r: R, radius: f32, ts: Transform| {
+        if let Some(p) = rr(r, radius) {
+            pm.stroke_path(&p, &black, &edge, ts, None);
+            pm.fill_path(&p, &white, FillRule::Winding, ts, None);
+        }
+    };
+    // Thumb, tilted out to the left.
+    let thumb = if closed { R::new(7.0, 14.5, 4.2, 8.0) } else { R::new(5.5, 12.0, 4.2, 10.0) };
+    part(thumb, 2.1, base.pre_concat(Transform::from_rotate_at(-35.0, thumb.cx(), thumb.bottom())));
+    // Palm.
+    part(R::new(8.5, 14.0, 15.5, 13.0), 5.0, base);
+    // Fingers: long and spread when open, short knuckles when closed.
+    let fingers: [(f32, f32); 4] =
+        if closed { [(10.6, 11.0), (14.4, 10.0), (18.2, 10.3), (21.8, 11.5)] } else { [(10.6, 5.5), (14.4, 3.5), (18.2, 4.5), (21.8, 7.5)] };
+    for (x, top) in fingers {
+        let bottom = if closed { 17.0 } else { 18.0 };
+        part(R::new(x - 1.9, top, 3.8, bottom - top), 1.9, base);
+    }
+    Some(pm)
+}
+unsafe fn make_cursor(pm: &Pixmap, hx: u32, hy: u32) -> HCURSOR {
+    let (w, h) = (pm.width() as i32, pm.height() as i32);
+    let bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: w,
+            biHeight: -h,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+    let Ok(color) = CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0) else { return HCURSOR::default() };
+    let dst = std::slice::from_raw_parts_mut(bits as *mut u8, (w * h * 4) as usize);
+    for (d, s) in dst.chunks_exact_mut(4).zip(pm.pixels()) {
+        let c = s.demultiply();
+        d[0] = c.blue();
+        d[1] = c.green();
+        d[2] = c.red();
+        d[3] = c.alpha();
+    }
+    let mask = windows::Win32::Graphics::Gdi::CreateBitmap(w, h, 1, 1, None);
+    let info = ICONINFO { fIcon: BOOL(0), xHotspot: hx, yHotspot: hy, hbmMask: mask, hbmColor: color };
+    let cur = CreateIconIndirect(&info).unwrap_or_default();
+    let _ = DeleteObject(color.into());
+    let _ = DeleteObject(mask.into());
+    HCURSOR(cur.0)
 }
 
 /// An HICON of `size` px from the app icon.
@@ -1151,6 +1239,16 @@ mod tests {
         let mut v = vec![mon(0, 0, 2560, 1440, 1.0, true), mon(-3840, 200, 0, 2360, 1.5, false)];
         layout_dip(&mut v);
         assert_eq!((v[1].dx, v[1].dy), (-2560.0, 200.0));
+    }
+
+    /// `cargo test hand_preview -- --ignored` writes the drawn cursors to %TEMP% to look at.
+    #[test]
+    #[ignore]
+    fn hand_preview() {
+        for (closed, name) in [(false, "grab"), (true, "grabbing")] {
+            let pm = hand_pixmap(closed, 96).unwrap();
+            pm.save_png(std::env::temp_dir().join(format!("aqo-cursor-{name}.png"))).unwrap();
+        }
     }
 
     #[test]
