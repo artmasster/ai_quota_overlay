@@ -56,6 +56,10 @@ impl Default for Settings {
 /// Per-user data folder: %APPDATA%\Ai Quota Overlay, ~/Library/Application Support/Ai Quota Overlay,
 /// $XDG_CONFIG_HOME (or ~/.config)/Ai Quota Overlay.
 pub fn data_dir() -> PathBuf {
+    // Dev aid: keep test settings away from the real ones without moving %APPDATA% (Cursor's login lives there).
+    if let Some(d) = std::env::var_os("QUOTA_OVERLAY_DATA_DIR") {
+        return PathBuf::from(d);
+    }
     let base = if cfg!(windows) {
         std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| home().join("AppData").join("Roaming"))
     } else if cfg!(target_os = "macos") {

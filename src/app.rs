@@ -1254,7 +1254,7 @@ impl App {
         }
         if let Some(t) = self.last_fetch {
             let gap = if self.on_screen(h) { POLL } else { IDLE_POLL };
-            min_at(t + gap - Duration::from_secs(1));
+            min_at(t + gap);
         }
         h.set_timer(next.max(Duration::from_millis(1)));
     }

@@ -129,6 +129,7 @@ fn read_resp(mut resp: ureq::http::Response<ureq::Body>) -> Result<Resp, HttpErr
 }
 
 pub fn get(url: &str, headers: &[(&str, &str)]) -> Result<Resp, HttpErr> {
+    log_request("GET", url);
     let mut req = agent().get(url);
     for (k, v) in headers {
         req = req.header(*k, *v);
@@ -137,6 +138,7 @@ pub fn get(url: &str, headers: &[(&str, &str)]) -> Result<Resp, HttpErr> {
 }
 
 pub fn post_json(url: &str, headers: &[(&str, &str)], body: &serde_json::Value) -> Result<Resp, HttpErr> {
+    log_request("POST", url);
     let bytes = serde_json::to_vec(body).map_err(|e| HttpErr::Other(e.to_string()))?;
     let mut req = agent().post(url);
     if !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
@@ -150,6 +152,7 @@ pub fn post_json(url: &str, headers: &[(&str, &str)], body: &serde_json::Value) 
 
 /// True when any HTTP status comes back within `timeout`; false only when the request itself failed.
 pub fn head_ok(url: &str, timeout: Duration) -> bool {
+    log_request("HEAD", url);
     head_agent().head(url).config().timeout_global(Some(timeout)).build().call().is_ok()
 }
 
@@ -162,6 +165,7 @@ fn part_path(dest: &Path) -> PathBuf {
 /// Streams `url` into `<dest>.part`, then renames it to `dest`. Follows redirects; non-2xx is an error.
 /// `progress(done, total)` is called as bytes arrive; total is None when the server sends no length.
 pub fn download(url: &str, dest: &Path, progress: &mut dyn FnMut(u64, Option<u64>)) -> Result<(), HttpErr> {
+    log_request("DOWNLOAD", url);
     let resp = agent()
         .get(url)
         .config()
@@ -240,5 +244,17 @@ mod tests {
     #[test]
     fn bad_url_is_other() {
         assert!(matches!(get("not a url", &[]), Err(HttpErr::Other(_))));
+    }
+}
+
+/// Dev aid: QUOTA_OVERLAY_LOG_REQUESTS=<file> appends "<unix ms> <method> <url without query>" per request
+/// (never headers or bodies), to check the polling rhythm.
+fn log_request(method: &str, url: &str) {
+    static PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+    let Some(path) = PATH.get_or_init(|| std::env::var_os("QUOTA_OVERLAY_LOG_REQUESTS").map(Into::into)) else { return };
+    let bare = url.split('?').next().unwrap_or(url);
+    let line = format!("{} {method} {bare}\n", crate::model::now_ms());
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = f.write_all(line.as_bytes());
     }
 }

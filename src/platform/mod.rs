@@ -4,5 +4,10 @@ mod windows;
 #[cfg(windows)]
 pub use self::windows::{run, UNINSTALLER};
 
+#[cfg(unix)]
+mod unix;
+#[cfg(unix)]
+pub use self::unix::run;
+
 #[cfg(not(windows))]
 pub const UNINSTALLER: &str = "";

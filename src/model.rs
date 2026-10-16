@@ -37,7 +37,7 @@ impl Svc {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Win {
     pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "whole_as_int")]
     pub span: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -136,4 +136,13 @@ pub struct NetState {
 
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+/// Writes 18000 rather than 18000.0, as JSON.stringify did.
+fn whole_as_int<S: serde::Serializer>(v: &Option<f64>, s: S) -> Result<S::Ok, S::Error> {
+    match v {
+        Some(x) if x.fract() == 0.0 && x.abs() < 9e15 => s.serialize_i64(*x as i64),
+        Some(x) => s.serialize_f64(*x),
+        None => s.serialize_none(),
+    }
 }

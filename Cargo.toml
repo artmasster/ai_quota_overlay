@@ -41,9 +41,22 @@ windows = { version = "0.62", features = [
 
 [target.'cfg(target_os = "macos")'.dependencies]
 ureq = { version = "3", default-features = false, features = ["native-tls", "gzip"] }
+winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
+raw-window-handle = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSString"] }
+core-graphics = "0.24"
+foreign-types = "0.5"
+tray-icon = { version = "0.21", default-features = false }
+global-hotkey = "0.7"
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
+winit = { version = "0.30", default-features = false, features = ["x11", "rwh_06"] }
+raw-window-handle = "0.6"
+x11rb = { version = "0.13", features = ["image", "randr"] }
+ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
+global-hotkey = "0.7"
 
 [profile.release]
 opt-level = "s"
