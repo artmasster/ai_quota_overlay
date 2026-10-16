@@ -65,6 +65,7 @@ impl RectD {
     pub fn new(x: f64, y: f64, w: f64, h: f64) -> Self {
         Self { x, y, w, h }
     }
+    #[allow(dead_code)] // macOS / Linux
     pub fn contains(&self, x: f64, y: f64) -> bool {
         x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
     }
@@ -85,6 +86,7 @@ pub struct Display {
 pub enum Btn3 {
     Left,
     Right,
+    #[allow(dead_code)] // macOS / Linux
     Middle,
 }
 
@@ -105,6 +107,8 @@ pub enum Key {
     Other,
 }
 
+/// Not every platform sends every event (no tray menu on Windows, no display events from winit).
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Ev {
     /// Position in DIP relative to the window's top-left.
@@ -302,9 +306,6 @@ impl App {
         }
     }
 
-    pub fn sender(&self) -> (Sender<Msg>, Waker) {
-        (self.tx.clone(), self.waker.clone())
-    }
 
     fn lang(&self) -> Lang {
         Lang::from_key(&self.settings.lang).unwrap_or(Lang::En)
@@ -970,7 +971,6 @@ impl App {
             net: if self.settings.network { self.net } else { None },
             update: self.updater.view(self.settings.skip_version.as_deref()),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            now: now_ms(),
         }
     }
 
@@ -1042,12 +1042,7 @@ impl App {
                 self.update_action(h, u);
                 return;
             }
-            AppAction::Redraw => {
-                if let Some(a) = &mut self.app_win {
-                    a.dirty = true;
-                }
-                return;
-            }
+
         }
         self.save();
         self.dirty_card = true;

@@ -73,7 +73,7 @@ struct RingBox {
 }
 
 enum Item {
-    Net { r: R, online: bool, ms: Option<u64>, name_w: f32, lbl: String },
+    Net { r: R, online: bool, name_w: f32, lbl: String },
     Svc { r: R, svc: Svc, name_w: f32, rings: Vec<RingBox>, divider: bool },
     Empty { r: R, text: String, after_net: bool },
     More { r: R },
@@ -155,7 +155,7 @@ pub fn layout(f: &mut Fonts, inp: &CardIn) -> CardLayout {
         let light_w = RING.max(lbl_w) + 4.0;
         let w = name_w.max(light_w);
         let h = ns.lh + 2.0 + 2.0 + RING + 1.0 + ls.lh + 1.0;
-        Some(Item::Net { r: R::new(0.0, 0.0, w, h), online: n.online, ms: n.ms, name_w, lbl })
+        Some(Item::Net { r: R::new(0.0, 0.0, w, h), online: n.online, name_w, lbl })
     };
 
     let more_item = || Item::More { r: R::default() };
@@ -379,7 +379,7 @@ pub fn draw(c: &mut Canvas, f: &mut Fonts, l: &CardLayout, inp: &CardIn, fx: &Ca
 
     for it in &l.items {
         match it {
-            Item::Net { r, online, ms: _, name_w, lbl } => {
+            Item::Net { r, online, name_w, lbl } => {
                 let mut ns = name_style(if *online { OK } else { BAD });
                 let mut ls = lbl_style();
                 if !*online {

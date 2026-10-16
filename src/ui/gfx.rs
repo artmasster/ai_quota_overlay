@@ -3,7 +3,7 @@
 //! (CSS px → device px).
 use tiny_skia::{
     BlendMode, Color, FillRule, FilterQuality, GradientStop, LineCap, LinearGradient, Mask, Paint, Path, PathBuilder,
-    Pixmap, PixmapPaint, Point, Rect, Shader, SpreadMode, Stroke, Transform,
+    Pixmap, PixmapPaint, Point, Shader, SpreadMode, Stroke, Transform,
 };
 
 /// Non-premultiplied sRGB colour, 0..1.
@@ -535,6 +535,3 @@ fn gradient_line(deg: f32, b: R) -> (Point, Point) {
     (Point::from_xy(b.cx() - dx, b.cy() - dy), Point::from_xy(b.cx() + dx, b.cy() + dy))
 }
 
-pub fn rect(x: f32, y: f32, w: f32, h: f32) -> Option<Rect> {
-    Rect::from_xywh(x, y, w, h)
-}

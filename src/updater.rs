@@ -153,10 +153,6 @@ impl Updater {
         }
     }
 
-    fn send(&self, m: UpMsg) {
-        let _ = self.tx.send(Msg::Update(m));
-        (self.waker)();
-    }
 
     pub fn check(&mut self) {
         if matches!(self.phase, Phase::Unsupported | Phase::Checking | Phase::Downloading | Phase::Installing) {

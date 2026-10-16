@@ -20,6 +20,7 @@ mod os;
 #[path = "x11.rs"]
 mod os;
 
+#[allow(dead_code)] // the tray menu items exist on Linux only
 #[derive(Debug, Clone, Copy)]
 pub enum UserEv {
     Wake,
@@ -43,7 +44,6 @@ fn idx(k: WinKind) -> usize {
 
 pub struct Win {
     pub window: Arc<Window>,
-    pub kind: WinKind,
     /// Device px per DIP as last presented.
     pub scale: f64,
     pub visible: bool,
@@ -51,8 +51,8 @@ pub struct Win {
     pub last: Option<Pixmap>,
     pub alpha: f64,
     pub cursor: (f64, f64),
-    pub press: Option<(Instant, f64, f64)>,
     pub last_click: Option<(Instant, f64, f64)>,
+    #[allow(dead_code)] // empty on macOS
     pub os: os::WinData,
 }
 
@@ -100,13 +100,11 @@ impl UnixHost {
         let data = os::WinData::new(&window, kind);
         self.wins[idx(kind)] = Some(Win {
             window,
-            kind,
             scale: 1.0,
             visible: false,
             last: None,
             alpha: 1.0,
             cursor: (0.0, 0.0),
-            press: None,
             last_click: None,
             os: data,
         });

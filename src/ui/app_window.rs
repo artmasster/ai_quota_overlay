@@ -32,7 +32,6 @@ pub struct Ctx {
     pub net: Option<NetState>,
     pub update: View,
     pub version: String,
-    pub now: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -77,7 +76,6 @@ pub enum Action {
     Restart,
     Quit,
     Update(&'static str),
-    Redraw,
 }
 
 /// Switches by key, for the knob animation.

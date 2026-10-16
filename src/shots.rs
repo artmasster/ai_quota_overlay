@@ -192,7 +192,6 @@ pub fn app_window(dir: &Path, fonts: &mut Fonts, now: i64) -> std::io::Result<()
                 dismissed: false,
             },
             version: env!("CARGO_PKG_VERSION").into(),
-            now,
         };
         let w = 440.0;
         let mut aw = AppWin::new();

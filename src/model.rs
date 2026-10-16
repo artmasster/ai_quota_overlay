@@ -25,9 +25,7 @@ impl Svc {
             Svc::Cursor => "Cursor",
         }
     }
-    pub fn from_key(k: &str) -> Option<Svc> {
-        SERVICES.into_iter().find(|s| s.key() == k)
-    }
+
     pub fn index(self) -> usize {
         self as usize
     }
