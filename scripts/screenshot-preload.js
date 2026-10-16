@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('overlay', {
   onSettings: on('settings'),
   onSelected: on('selected'),
   onReveal: on('reveal'),
-  size: ignore, select: ignore, refresh: ignore, menu: ignore, openSettings: ignore, set: ignore, snap: ignore,
+  onUpdate: on('update'),
+  size: ignore, select: ignore, refresh: ignore, openSettings: ignore, set: ignore, snap: ignore, restart: ignore, quit: ignore, update: ignore,
   dragStart: ignore, dragMove: ignore, dragEnd: ignore,
 });

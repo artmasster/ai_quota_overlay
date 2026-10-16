@@ -34,10 +34,14 @@ const base = {
   services: { claude: true, codex: true, cursor: true },
   // The Opus and Codex 5 h windows are switched off, as one would in Settings.
   hidden: { claude: ['seven_day_opus'], codex: ['primary'], cursor: [] },
-  seen, startup: true, canStartAtLogin: true, version: require('../package.json').version,
+  seen, startup: true, canStartAtLogin: true, visible: true, version: require('../package.json').version,
 };
 
-// name, settings override, open panel ({ svc, index } of a ring), data override, network
+const version = base.version;
+const updateAvailable = { phase: 'available', current: version, version: '1.3.0', skipped: false, dismissed: false };
+
+// name, settings override, open panel ({ svc, index } of a ring) or 'toast' (update toast), data override, network,
+// update state
 const SHOTS = [
   ['hero', {}, { svc: 'claude', index: 0 }],
   ['horizontal', {}, null],
@@ -46,6 +50,8 @@ const SHOTS = [
   ['network', { network: true }, null, null, { online: true, ms: 23 }],
   ['thai', { lang: 'th' }, { svc: 'claude', index: 1 }],
   ['error', {}, { svc: 'claude', index: -1 }, { claude: { ok: false, error: { code: 'claudeExpired', status: 400 } } }],
+  ['update', {}, 'toast', null, null, updateAvailable],
+  ['update-progress', {}, 'toast', null, null, { ...updateAvailable, phase: 'downloading', percent: 64 }],
 ];
 
 const hidden = (zoom, size = { width: 1200, height: 1400 }) => new BrowserWindow({
@@ -54,20 +60,22 @@ const hidden = (zoom, size = { width: 1200, height: 1400 }) => new BrowserWindow
 });
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// One view of the app page (card or panel) with demo data, cropped to its element.
-async function capture(view, cfg, data, selected, network) {
+// One view of the app (card, panel or update toast) with demo data, cropped to its element.
+async function capture(view, cfg, data, selected, network, update) {
   const win = hidden(ZOOM);
-  await win.loadFile(path.join(SRC, 'index.html'), { query: { view } });
-  await win.webContents.insertCSS('.detail.show { animation: none !important; }');
+  await win.loadFile(path.join(SRC, view === 'toast' ? 'toast.html' : 'index.html'), { query: { view } });
+  await win.webContents.insertCSS('.detail.show, .toast { animation: none !important; }');
   const send = (name, payload) => win.webContents.send('demo', name, payload);
   send('settings', cfg);
   if (network) send('network', network);
+  if (update) send('update', update);
   send('quota', data);
   send('selected', selected);
   send('reveal');
   await wait(300);
+  const selector = { panel: '.detail', toast: '.toast' }[view] ?? '.card';
   const r = await win.webContents.executeJavaScript(`(() => {
-    const r = document.querySelector('${view === 'panel' ? '.detail' : '.card'}').getBoundingClientRect();
+    const r = document.querySelector('${selector}').getBoundingClientRect();
     return { x: r.left, y: r.top, w: r.width, h: r.height };
   })()`);
   const img = await win.webContents.capturePage({
@@ -109,6 +117,7 @@ async function captureSettings(cfg, network) {
   send('settings', cfg);
   if (network) send('network', network);
   send('quota', demo);
+  send('update', updateAvailable);
   await wait(300);
   const h = await win.webContents.executeJavaScript(
     `document.querySelector('.titlebar').offsetHeight + document.querySelector('main').scrollHeight`);
@@ -122,11 +131,12 @@ async function captureSettings(cfg, network) {
 app.on('window-all-closed', () => {});
 app.whenReady().then(async () => {
   fs.mkdirSync(OUT, { recursive: true });
-  for (const [name, override, selected, dataOverride, network] of SHOTS) {
+  for (const [name, override, selected, dataOverride, network, update] of SHOTS) {
     const cfg = { ...base, ...override };
     const data = { ...demo, ...dataOverride };
-    const card = await capture('card', cfg, data, selected, network);
-    const panel = selected && await capture('panel', cfg, data, selected, network);
+    const toast = selected === 'toast';
+    const card = await capture('card', cfg, data, toast ? null : selected, network);
+    const panel = selected && await capture(toast ? 'toast' : 'panel', cfg, data, toast ? null : selected, network, update);
     const img = await compose(card, panel, cfg.vertical);
     fs.writeFileSync(path.join(OUT, `${name}.png`), img.toPNG());
     console.log('wrote', `docs/${name}.png`);

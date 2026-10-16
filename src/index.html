@@ -392,7 +392,8 @@
       document.body.classList.remove('dragging');
     });
     root.addEventListener('dblclick', (e) => { if (!e.target.closest('.ring, .more')) window.overlay.refresh(); });
-    root.addEventListener('contextmenu', (e) => { e.preventDefault(); window.overlay.menu(); });
+    // Right-click opens the app window, where all the settings and actions are.
+    root.addEventListener('contextmenu', (e) => { e.preventDefault(); window.overlay.openSettings(); });
   }
 </script>
 </body>
