@@ -30,7 +30,7 @@ jobs:
         env:
           RUSTFLAGS: -C target-feature=+crt-static
         run: cargo build --release --locked
-      -       - name: Installer (unsigned, for checking)
+      - name: Installer (unsigned, for checking)
         shell: pwsh
         run: |
           $v = (Select-String Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
@@ -38,7 +38,8 @@ jobs:
           if (-not $mk) { choco install nsis -y --no-progress | Out-Null; $mk = 'C:\Program Files (x86)\NSIS\makensis.exe' }
           New-Item -ItemType Directory -Force dist | Out-Null
           & $mk /V2 "/DVERSION=$v" "/DEXE_PATH=$PWD\target\release\ai-quota-overlay.exe" "/DOUTFILE=$PWD\dist\AiQuotaOverlay-$v-win-x64-setup.exe" installer\installer.nsi
-          if ($LASTEXITCODE) { exit 1 }uses: actions/upload-artifact@v4
+          if ($LASTEXITCODE) { exit 1 }
+      - uses: actions/upload-artifact@v4
         with:
           name: windows-unsigned
           path: dist/*.exe
