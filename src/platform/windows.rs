@@ -74,6 +74,8 @@ thread_local! {
     static CURSOR: Cell<CursorKind> = const { Cell::new(CursorKind::Default) };
     static TASKBAR_CREATED: Cell<u32> = const { Cell::new(0) };
     static APP_PIXELS: RefCell<(u32, u32, Vec<u8>)> = const { RefCell::new((0, 0, Vec::new())) };
+    /// The app window's fixed size in DIP (it is not resizable).
+    static APP_DIP: Cell<(f64, f64)> = const { Cell::new((0.0, 0.0)) };
     static DISPLAYS: RefCell<Vec<Mon>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -466,7 +468,10 @@ impl Host for WinHost {
                 return;
             }
             let (p, scale) = to_phys(r);
+            APP_DIP.with(|d| d.set((r.w, r.h)));
             let t = wide(title);
+            // WS_THICKFRAME only for the DWM shadow and rounded corners: there are no resize borders and
+            // WM_GETMINMAXINFO pins the size.
             let style = WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_SYSMENU | WS_CLIPCHILDREN;
             let Ok(h) = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
@@ -475,8 +480,8 @@ impl Host for WinHost {
                 style,
                 p.left,
                 p.top,
-                p.right - p.left,
-                p.bottom - p.top,
+                (r.w * scale).round() as i32,
+                (r.h * scale).round() as i32,
                 None,
                 None,
                 None,
@@ -1001,39 +1006,27 @@ unsafe extern "system" fn app_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) ->
             let mut r = RECT::default();
             let _ = GetWindowRect(h, &mut r);
             let s = GetDpiForWindow(h) as f64 / 96.0;
-            let b = (6.0 * s).round() as i32;
-            let (x, y) = (sx - r.left, sy - r.top);
-            let (w, hh) = (r.right - r.left, r.bottom - r.top);
-            let (l, t, rt, bt) = (x < b, y < b, x >= w - b, y >= hh - b);
-            let hit = match (l, t, rt, bt) {
-                (true, true, _, _) => HTTOPLEFT,
-                (_, true, true, _) => HTTOPRIGHT,
-                (true, _, _, true) => HTBOTTOMLEFT,
-                (_, _, true, true) => HTBOTTOMRIGHT,
-                (true, _, _, _) => HTLEFT,
-                (_, _, true, _) => HTRIGHT,
-                (_, true, _, _) => HTTOP,
-                (_, _, _, true) => HTBOTTOM,
-                _ => {
-                    // The title bar (46 px) drags the window, except its close button (32×30, 8 px from the right).
-                    let (dx, dy) = (x as f64 / s, y as f64 / s);
-                    let wd = w as f64 / s;
-                    let on_close = dx >= wd - 40.0 && dx < wd - 8.0 && dy >= 7.5 && dy < 37.5;
-                    if dy < 46.0 && !on_close {
-                        HTCAPTION
-                    } else {
-                        HTCLIENT
-                    }
-                }
-            };
-            LRESULT(hit as isize)
+            let s = if s > 0.0 { s } else { 1.0 };
+            // Fixed size: no resize borders. The title bar (46 px) drags the window, except its close button
+            // (32×30, 8 px from the right).
+            let (dx, dy) = ((sx - r.left) as f64 / s, (sy - r.top) as f64 / s);
+            let wd = (r.right - r.left) as f64 / s;
+            let on_close = dx >= wd - 40.0 && dx < wd - 8.0 && dy >= 7.5 && dy < 37.5;
+            LRESULT(if dy < 46.0 && !on_close { HTCAPTION } else { HTCLIENT } as isize)
         }
+        // Activation changes would repaint the classic frame over the edges of the frameless window (a white
+        // border that flashes when focus moves); lParam −1 tells DefWindowProc not to repaint the non-client area.
+        WM_NCACTIVATE => DefWindowProcW(h, msg, wp, LPARAM(-1)),
         WM_NCLBUTTONDBLCLK => LRESULT(0), // not maximizable
         WM_GETMINMAXINFO => {
             let info = &mut *(lp.0 as *mut MINMAXINFO);
             let s = GetDpiForWindow(h) as f64 / 96.0;
             let s = if s > 0.0 { s } else { 1.0 };
-            info.ptMinTrackSize = POINT { x: (380.0 * s) as i32, y: (420.0 * s) as i32 };
+            let (w, hh) = APP_DIP.with(|d| d.get());
+            let size = POINT { x: (w * s).round() as i32, y: (hh * s).round() as i32 };
+            info.ptMinTrackSize = size;
+            info.ptMaxTrackSize = size;
+            info.ptMaxSize = size;
             LRESULT(0)
         }
         WM_DPICHANGED => {

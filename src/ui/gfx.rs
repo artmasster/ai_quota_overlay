@@ -2,7 +2,7 @@
 //! gradients, blurred shadows and layers (opacity / grayscale / brightness), all through one transform
 //! (CSS px → device px).
 use tiny_skia::{
-    BlendMode, Color, FillRule, FilterQuality, GradientStop, LineCap, LinearGradient, Mask, Paint, Path, PathBuilder,
+    Color, FillRule, FilterQuality, GradientStop, LineCap, LinearGradient, Mask, Paint, Path, PathBuilder,
     Pixmap, PixmapPaint, Point, Shader, SpreadMode, Stroke, Transform,
 };
 
@@ -224,6 +224,14 @@ impl<'a> Canvas<'a> {
     }
 
     pub fn fill_rr(&mut self, r: R, radius: f32, fill: impl Into<Fill>) {
+        let fill = fill.into();
+        if let (true, Fill::Solid(_)) = (radius <= 0.0 && self.base.kx == 0.0 && self.base.ky == 0.0, &fill) {
+            // Plain rectangle: tiny-skia's rect fill (no path rasteriser) in device px.
+            let Some(rect) = tiny_skia::Rect::from_xywh(r.x, r.y, r.w, r.h).and_then(|x| x.transform(self.base)) else { return };
+            let p = self.paint(&fill);
+            self.pm.fill_rect(rect, &p, Transform::identity(), None);
+            return;
+        }
         if let Some(p) = rr(r, radius) {
             self.fill_path(&p, fill);
         }
@@ -356,18 +364,28 @@ impl<'a> Canvas<'a> {
         let y0 = (b.top() - pad).floor();
         let w = ((b.right() + pad).ceil() - x0) as u32;
         let h = ((b.bottom() + pad).ceil() - y0) as u32;
-        let Some(mut tmp) = Pixmap::new(w.max(1), h.max(1)) else { return };
-        let ts = self.base.post_translate(-x0, -y0);
-        let mut p = Paint { anti_alias: true, ..Paint::default() };
-        p.set_color(color.sk());
-        tmp.fill_path(&shape, &p, FillRule::Winding, ts, None);
-        blur_pixmap(&mut tmp, sigma);
-        if let Some(h) = &hole {
-            // Punch the box out of the shadow.
-            let mut cut = Paint { anti_alias: true, blend_mode: BlendMode::DestinationOut, ..Paint::default() };
-            cut.set_color(Color::BLACK);
-            tmp.fill_path(h, &cut, FillRule::Winding, ts, None);
+        if x0 >= self.pm.width() as f32 || y0 >= self.pm.height() as f32 || x0 + w as f32 <= 0.0 || y0 + h as f32 <= 0.0 {
+            return; // off the canvas (layout dry runs draw far outside it)
         }
+        // One colour all over, so only the coverage needs blurring; the colour is painted through it.
+        let (w, h) = (w.max(1), h.max(1));
+        let Some(mut cover) = Mask::new(w, h) else { return };
+        let ts = self.base.post_translate(-x0, -y0);
+        cover.fill_path(&shape, FillRule::Winding, true, ts);
+        blur_alpha(cover.data_mut(), w as usize, h as usize, sigma);
+        if let Some(hl) = &hole {
+            // Punch the box out of the shadow.
+            if let Some(mut cut) = Mask::new(w, h) {
+                cut.fill_path(hl, FillRule::Winding, true, ts);
+                for (m, k) in cover.data_mut().iter_mut().zip(cut.data()) {
+                    *m = div255(*m as u32 * (255 - *k as u32));
+                }
+            }
+        }
+        let mut p = Paint { anti_alias: false, ..Paint::default() };
+        p.set_color(color.sk());
+        let (Some(mut tmp), Some(rect)) = (Pixmap::new(w, h), tiny_skia::Rect::from_xywh(0.0, 0.0, w as f32, h as f32)) else { return };
+        tmp.fill_rect(rect, &p, Transform::identity(), Some(&cover));
         self.pm.draw_pixmap(x0 as i32, y0 as i32, tmp.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
     }
 
@@ -398,17 +416,43 @@ impl<'a> Canvas<'a> {
         self.pm.draw_pixmap(0, 0, tmp.as_ref(), &paint, ts, None);
     }
 
+    /// Like `layer` with no transform, but the scratch layer only covers `area` (CSS px): what `f` paints outside
+    /// it is dropped. Much cheaper than a whole-canvas layer on a big window.
+    pub fn layer_in(&mut self, area: R, opacity: f32, filter: Filter, f: impl FnOnce(&mut Canvas)) {
+        let Some((x0, y0, w, h)) = self.device_box(area) else { return };
+        let Some(mut tmp) = Pixmap::new(w, h) else { return };
+        {
+            let mut c = Canvas { pm: &mut tmp, base: self.base.post_translate(-x0 as f32, -y0 as f32), scale: self.scale };
+            f(&mut c);
+        }
+        apply_filter(&mut tmp, filter);
+        let paint = PixmapPaint { opacity: opacity.clamp(0.0, 1.0), ..PixmapPaint::default() };
+        self.pm.draw_pixmap(x0, y0, tmp.as_ref(), &paint, Transform::identity(), None);
+    }
+
     /// Clip drawing of `f` to a rounded rectangle (CSS overflow: hidden).
     pub fn clipped(&mut self, r: R, radius: f32, f: impl FnOnce(&mut Canvas)) {
-        let Some(mut tmp) = Pixmap::new(self.pm.width(), self.pm.height()) else { return };
+        let Some((x0, y0, w, h)) = self.device_box(r) else { return };
+        let Some(mut tmp) = Pixmap::new(w, h) else { return };
+        let base = self.base.post_translate(-x0 as f32, -y0 as f32);
         {
-            let mut c = Canvas { pm: &mut tmp, base: self.base, scale: self.scale };
+            let mut c = Canvas { pm: &mut tmp, base, scale: self.scale };
             f(&mut c);
         }
         let Some(path) = rr(r, radius) else { return };
-        let Some(mut mask) = Mask::new(self.pm.width(), self.pm.height()) else { return };
-        mask.fill_path(&path, FillRule::Winding, true, self.base);
-        self.pm.draw_pixmap(0, 0, tmp.as_ref(), &PixmapPaint::default(), Transform::identity(), Some(&mask));
+        let Some(mut mask) = Mask::new(w, h) else { return };
+        mask.fill_path(&path, FillRule::Winding, true, base);
+        self.pm.draw_pixmap(x0, y0, tmp.as_ref(), &PixmapPaint::default(), Transform::identity(), Some(&mask));
+    }
+
+    /// The device-pixel box (x, y, w, h) covering `r`, one pixel bigger all round for anti-aliasing, cut to the canvas.
+    fn device_box(&self, r: R) -> Option<(i32, i32, u32, u32)> {
+        let b = tiny_skia::Rect::from_xywh(r.x, r.y, r.w, r.h)?.transform(self.base)?;
+        let x0 = (b.left().floor() as i32 - 1).max(0);
+        let y0 = (b.top().floor() as i32 - 1).max(0);
+        let x1 = (b.right().ceil() as i32 + 1).min(self.pm.width() as i32);
+        let y1 = (b.bottom().ceil() as i32 + 1).min(self.pm.height() as i32);
+        (x1 > x0 && y1 > y0).then(|| (x0, y0, (x1 - x0) as u32, (y1 - y0) as u32))
     }
 
     /// Runs `f` with an extra transform (CSS px) applied on top of the base.
@@ -455,19 +499,20 @@ fn apply_filter(pm: &mut Pixmap, f: Filter) {
     }
 }
 
-/// Approximate Gaussian blur (three box passes each way) on a premultiplied pixmap.
-pub fn blur_pixmap(pm: &mut Pixmap, sigma: f32) {
+/// Approximate Gaussian blur (three box passes each way) of a coverage mask.
+fn blur_alpha(data: &mut [u8], w: usize, h: usize, sigma: f32) {
     if sigma < 0.3 {
         return;
     }
-    let (w, h) = (pm.width() as usize, pm.height() as usize);
-    let boxes = box_sizes(sigma, 3);
-    let data = pm.data_mut();
     let mut buf = vec![0u8; data.len()];
-    for r in boxes {
+    for r in box_sizes(sigma, 3) {
         box_blur_h(data, &mut buf, w, h, r);
         box_blur_v(&buf, data, w, h, r);
     }
+}
+
+fn div255(v: u32) -> u8 {
+    ((v + 128) * 257 >> 16) as u8
 }
 
 fn box_sizes(sigma: f32, n: usize) -> Vec<usize> {
@@ -485,42 +530,45 @@ fn box_sizes(sigma: f32, n: usize) -> Vec<usize> {
 
 fn box_blur_h(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize) {
     let div = (2 * r + 1) as u32;
+    let inv = (1u32 << 24) / div;
     for y in 0..h {
-        let row = y * w * 4;
-        for c in 0..4 {
-            let at = |x: isize| -> u32 {
-                if x < 0 || x >= w as isize {
-                    0
-                } else {
-                    src[row + x as usize * 4 + c] as u32
-                }
-            };
-            let mut acc: u32 = (-(r as isize)..=r as isize).map(at).sum();
-            for x in 0..w {
-                dst[row + x * 4 + c] = ((acc + div / 2) / div) as u8;
-                acc += at(x as isize + r as isize + 1);
-                acc -= at(x as isize - r as isize);
-            }
+        let row = &src[y * w..(y + 1) * w];
+        let out = &mut dst[y * w..(y + 1) * w];
+        let at = |x: isize| -> u32 { if x < 0 || x >= w as isize { 0 } else { row[x as usize] as u32 } };
+        let mut acc: u32 = (-(r as isize)..=r as isize).map(at).sum();
+        for (x, o) in out.iter_mut().enumerate() {
+            *o = ((acc * inv + (1 << 23)) >> 24).min(255) as u8;
+            acc += at(x as isize + r as isize + 1);
+            acc -= at(x as isize - r as isize);
         }
     }
 }
 
 fn box_blur_v(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize) {
     let div = (2 * r + 1) as u32;
-    for x in 0..w {
-        for c in 0..4 {
-            let at = |y: isize| -> u32 {
-                if y < 0 || y >= h as isize {
-                    0
-                } else {
-                    src[y as usize * w * 4 + x * 4 + c] as u32
-                }
-            };
-            let mut acc: u32 = (-(r as isize)..=r as isize).map(at).sum();
-            for y in 0..h {
-                dst[y * w * 4 + x * 4 + c] = ((acc + div / 2) / div) as u8;
-                acc += at(y as isize + r as isize + 1);
-                acc -= at(y as isize - r as isize);
+    let inv = (1u32 << 24) / div;
+    // Row by row with a running sum per column (cache friendly).
+    let mut acc = vec![0u32; w];
+    for y in 0..=r.min(h.saturating_sub(1)) {
+        for (a, v) in acc.iter_mut().zip(&src[y * w..(y + 1) * w]) {
+            *a += *v as u32;
+        }
+    }
+    for y in 0..h {
+        let out = &mut dst[y * w..(y + 1) * w];
+        for (o, a) in out.iter_mut().zip(&acc) {
+            *o = ((*a * inv + (1 << 23)) >> 24).min(255) as u8;
+        }
+        let add = y + r + 1;
+        if add < h {
+            for (a, v) in acc.iter_mut().zip(&src[add * w..(add + 1) * w]) {
+                *a += *v as u32;
+            }
+        }
+        if y >= r {
+            let sub = y - r;
+            for (a, v) in acc.iter_mut().zip(&src[sub * w..(sub + 1) * w]) {
+                *a -= *v as u32;
             }
         }
     }
@@ -534,4 +582,3 @@ fn gradient_line(deg: f32, b: R) -> (Point, Point) {
     let (dx, dy) = (sin * len / 2.0, -cos * len / 2.0);
     (Point::from_xy(b.cx() - dx, b.cy() - dy), Point::from_xy(b.cx() + dx, b.cy() + dy))
 }
-

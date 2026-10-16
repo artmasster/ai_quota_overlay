@@ -162,7 +162,7 @@ pub fn run(dir: &Path) -> std::io::Result<()> {
     app_window(dir, &mut fonts, now)
 }
 
-/// The whole app window, tall enough to show everything without scrolling (settings-en.png / settings-th.png).
+/// The whole app window at its fixed size (settings-en.png / settings-th.png).
 pub fn app_window(dir: &Path, fonts: &mut Fonts, now: i64) -> std::io::Result<()> {
     use crate::ui::app_window::{AppWin, Ctx};
     use crate::updater::{Phase, View};
@@ -193,18 +193,15 @@ pub fn app_window(dir: &Path, fonts: &mut Fonts, now: i64) -> std::io::Result<()
             },
             version: env!("CARGO_PKG_VERSION").into(),
         };
-        let w = 440.0;
+        let (w, h) = (crate::ui::app_window::SIZE.0 as f32, crate::ui::app_window::SIZE.1 as f32);
         let mut aw = AppWin::new();
-        {
-            let mut scratch = Pixmap::new(10, 10).unwrap();
-            let mut c = Canvas::new(&mut scratch, 1.0, 0.0, 0.0);
-            aw.draw(&mut c, fonts, &ctx, w, 4000.0);
-        }
-        let h = 46.0 + aw.content_height();
-        let mut pm = Pixmap::new((w * zoom).round() as u32, (h * zoom).ceil() as u32).expect("pixmap");
+        let mut pm = Pixmap::new((w * zoom).round() as u32, (h * zoom).round() as u32).expect("pixmap");
         {
             let mut c = Canvas::new(&mut pm, zoom, 0.0, 0.0);
             aw.draw(&mut c, fonts, &ctx, w, h);
+        }
+        if aw.content_height() > h - 46.0 + 0.5 {
+            println!("{name}: content is {} px tall, {} px fit", aw.content_height(), h - 46.0);
         }
         pm.save_png(dir.join(format!("{name}.png"))).map_err(std::io::Error::other)?;
         println!("wrote {}", dir.join(format!("{name}.png")).display());

@@ -200,7 +200,12 @@ impl Fonts {
             }
         }
         let color = st.color;
+        let (cw, ch) = (c.pm.width() as i32, c.pm.height() as i32);
         for (key, gx, gy) in glyphs {
+            // Off the canvas (layout dry runs draw far outside it): nothing to rasterise.
+            if gy < -200 || gy > ch + 200 || gx > cw + 200 {
+                continue;
+            }
             let Some(img) = self.cache.get_image(&mut self.fs, key).as_ref() else { continue };
             if img.placement.width == 0 || img.placement.height == 0 {
                 continue;

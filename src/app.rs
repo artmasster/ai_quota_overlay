@@ -934,7 +934,9 @@ impl App {
             h.app_open(RectD::default(), &title);
         } else {
             let a = self.display_near(h, self.card.0.round(), self.card.1.round()).work;
-            let (w, hh) = (440.0, (760.0f64).min(a.h - 2.0 * MARGIN));
+            let (w0, h0) = crate::ui::app_window::SIZE;
+            let w = w0.min(a.w - 2.0 * MARGIN).min((a.h - 2.0 * MARGIN) * w0 / h0).round();
+            let hh = (w * h0 / w0).round();
             h.app_open(RectD::new((a.x + (a.w - w) / 2.0).round(), (a.y + (a.h - hh) / 2.0).round(), w, hh), &title);
             self.app_win = Some(AppWin::new());
         }

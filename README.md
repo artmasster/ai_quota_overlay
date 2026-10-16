@@ -93,6 +93,7 @@
 ## ⚙️ หน้าแอป
 
 ไม่มีเมนูคลิกขวาแล้ว ทุกอย่างย้ายมาอยู่ในหน้าแอปหน้าเดียว เปิดได้จาก `⋯` / คลิกขวาที่กล่อง / ไอคอน tray / เปิดแอปซ้ำจาก Start menu ทุกอย่างมีผลทันที ไม่ต้องรีสตาร์ท
+หน้าแอปเป็นหน้าต่าง 16:9 ขนาดคงที่ (1120 × 630) เห็นครบทุกอย่างโดยไม่ต้องเลื่อน (จอที่เล็กกว่านั้นหน้าต่างจะย่อลงตามสัดส่วนเดิม แล้วเลื่อนดูส่วนที่เหลือได้)
 (Linux: tray ไม่มี event คลิก จึงมีเมนูเล็กๆ ไว้เปิดหน้าแอปหรือปิดแอป)
 
 | ส่วน | ตั้งอะไรได้ |
@@ -126,8 +127,10 @@
 
 <table>
 <tr>
-<td align="center"><b>English</b><br><img src="docs/settings-en.png" width="330"></td>
-<td align="center"><b>ไทย</b><br><img src="docs/settings-th.png" width="330"></td>
+<td align="center"><b>English</b><br><img src="docs/settings-en.png" width="820"></td>
+</tr>
+<tr>
+<td align="center"><b>ไทย</b><br><img src="docs/settings-th.png" width="820"></td>
 </tr>
 </table>
 

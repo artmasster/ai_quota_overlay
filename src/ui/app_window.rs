@@ -21,6 +21,11 @@ const SURFACE2: Rgba = Rgba::hex(0x1d2029);
 const LINE: Rgba = Rgba::rgba(255, 255, 255, 0.07);
 const LINE2: Rgba = Rgba::rgba(255, 255, 255, 0.12);
 const TITLE_H: f32 = 46.0;
+/// Space above a section heading (the first one sits a little lower than this below the title bar).
+const GAP: f32 = 14.0;
+/// The window's size in DIP: 16:9, not resizable, everything visible without scrolling. (On a work area too
+/// small for it the window shrinks, keeping 16:9, and the content scrolls.)
+pub const SIZE: (f64, f64) = (1120.0, 630.0);
 const GUTTER: f32 = 10.0;
 
 pub struct Ctx {
@@ -312,7 +317,7 @@ impl AppWin {
         }
         self.view_h = h - TITLE_H;
         self.hits.clear();
-        c.fill_rr(R::new(0.0, 0.0, w, h), 0.0, BG);
+        c.pm.fill(BG.sk());
         let content_h = self.draw_main(c, f, ctx, w);
         self.content_h = content_h;
         let max = (content_h - self.view_h).max(0.0);
@@ -320,7 +325,7 @@ impl AppWin {
             // The window grew or content shrank: clamp and draw again.
             self.scroll = max;
             self.hits.clear();
-            c.fill_rr(R::new(0.0, 0.0, w, h), 0.0, BG);
+            c.pm.fill(BG.sk());
             self.draw_main(c, f, ctx, w);
         }
         self.draw_scrollbar(c, w, h);
@@ -373,16 +378,22 @@ impl AppWin {
         let _ = h;
     }
 
-    /// Paints `main` scrolled by `self.scroll`; returns its full content height.
+    /// Paints `main` scrolled by `self.scroll`, in two columns: General, Internet status and Updates on the left;
+    /// Services and the action buttons on the right; the footer across the bottom. Returns the content height.
     fn draw_main(&mut self, c: &mut Canvas, f: &mut Fonts, ctx: &Ctx, w: f32) -> f32 {
         let s = i18n::t(ctx.lang);
-        let x0 = 16.0;
-        let cw = w - 32.0 - GUTTER;
+        let col_gap = 20.0;
+        let cw = ((w - 32.0 - col_gap) / 2.0).floor();
         let top = TITLE_H - self.scroll;
-        let mut y = top + 6.0;
+        let y0 = top + 6.0;
+
+        // ---------- left column ----------
+        let x0 = 16.0;
+        let mut y = y0;
+        let lang = ctx.lang;
 
         // ---------- General ----------
-        y += 18.0;
+        y += GAP;
         y = self.sec_head(c, f, x0, y, s.s.general);
         let rows_y = y;
         y += 1.0; // .group border
@@ -399,7 +410,6 @@ impl AppWin {
         rows.push(y);
         y += 1.0;
         // Language
-        let lang = ctx.lang;
         y += self.row(c, f, x0, y, cw, &icons::GLOBE, s.s.language, None, &mut |me, c, f, right, mid| {
             let items: Vec<(Option<&Icon>, &str, Hit, bool)> = LANGS.iter().map(|(l, n)| (None, *n, Hit::Lang(*l), *l == lang)).collect();
             me.seg(c, f, right, mid, &items)
@@ -427,7 +437,7 @@ impl AppWin {
         if let Some(on) = ctx.startup {
             rows.push(y);
             y += 1.0;
-        y += 1.0;
+            y += 1.0;
             let pos = self.switch_pos(Sw::Startup, on);
             y += self.row(c, f, x0, y, cw, &icons::POWER, s.s.startup, Some(s.s.startup_hint), &mut |me, c, _f, right, mid| {
                 me.switch(c, right - 38.0, mid, pos, on, ACCENT, Hit::Startup);
@@ -438,7 +448,7 @@ impl AppWin {
         self.group_frame(c, x0, rows_y, cw, y - rows_y, &rows);
 
         // ---------- Internet status ----------
-        y += 18.0;
+        y += GAP;
         y = self.sec_head(c, f, x0, y, s.s.network);
         let gy = y;
         y += 1.0;
@@ -467,8 +477,14 @@ impl AppWin {
         y += 1.0;
         self.group_frame(c, x0, gy, cw, y - gy, &[]);
 
+        let left_end = y;
+
+        // ---------- right column ----------
+        let x0 = 16.0 + cw + col_gap;
+        let mut y = y0;
+
         // ---------- Services ----------
-        y += 18.0;
+        y += GAP;
         y = self.sec_head(c, f, x0, y, s.s.services);
         let hint = Style::new(11.5, 400, FAINT, 1.4);
         y -= 4.0;
@@ -482,31 +498,42 @@ impl AppWin {
         }
 
         // ---------- Updates ----------
-        y += 18.0;
+        y += GAP;
         y = self.sec_head(c, f, x0, y, s.u.section);
         let gy = y;
         y += 1.0;
         y += self.update_row(c, f, ctx, x0, y, cw);
         y += 1.0;
         self.group_frame(c, x0, gy, cw, y - gy, &[]);
+        let right_end = y;
 
-        // ---------- actions ----------
-        y += 20.0;
-        let bw = (cw - 8.0) / 2.0;
+        // ---------- actions ---------- (one row under the left column, level with the right column's end when
+        // there is room)
+        let x0 = 16.0;
+        let bw = (cw - 3.0 * 8.0) / 4.0;
+        let bh = Style::new(12.5, 500, TEXT, 1.4).lh + 18.0 + 2.0;
+        let y = (left_end + 16.0).max(right_end - bh);
         let spin = self.spin_from.map(|t| (t.elapsed().as_secs_f32() % 0.8) / 0.8 * 360.0).unwrap_or(0.0);
-        let bh = self.button(c, f, x0, y, bw, &icons::REFRESH, s.s.refresh, Hit::Refresh, false, if self.refresh_spin { spin } else { 0.0 });
-        self.button(c, f, x0 + bw + 8.0, y, bw, &icons::SNAP, s.s.snap, Hit::Snap, false, 0.0);
-        y += bh + 8.0;
-        self.button(c, f, x0, y, bw, &icons::RESTART, s.s.restart, Hit::Restart, false, 0.0);
-        self.button(c, f, x0 + bw + 8.0, y, bw, &icons::QUIT, s.s.quit, Hit::Quit, true, 0.0);
-        y += bh;
+        let buttons = [
+            (&icons::REFRESH, s.s.refresh, Hit::Refresh, false, if self.refresh_spin { spin } else { 0.0 }),
+            (&icons::SNAP, s.s.snap, Hit::Snap, false, 0.0),
+            (&icons::RESTART, s.s.restart, Hit::Restart, false, 0.0),
+            (&icons::QUIT, s.s.quit, Hit::Quit, true, 0.0),
+        ];
+        for (i, (icon, text, hit, danger, rot)) in buttons.into_iter().enumerate() {
+            self.button(c, f, x0 + i as f32 * (bw + 8.0), y, bw, icon, text, hit, danger, rot);
+        }
+        let left_end = y + bh;
+        let right_end = y;
 
-        // ---------- footer ----------
-        y += 16.0;
+        // ---------- footer ---------- (kept at the bottom of the window when everything fits)
+        let x0 = 16.0;
+        let cw = w - 32.0;
         let fs = Style::new(11.5, 400, FAINT, 1.4);
         let kbd = Style::new(10.5, 400, MUTED, 1.4).mono();
         let kh = kbd.lh + 2.0 + 3.0;
         let line_h = fs.lh.max(kh);
+        let y = (left_end.max(right_end) + 14.0).max(top + self.view_h - 14.0 - line_h);
         let mid = y + line_h / 2.0;
         let mut x = x0 + 4.0;
         let ver = format!("v{}", ctx.version);
@@ -533,9 +560,7 @@ impl AppWin {
             kx += kw + 4.0;
         }
         f.draw(c, kx - 4.0 + nb, mid - fs.lh / 2.0, label, &fs, None, 0.0);
-        y += line_h;
-        y += 18.0;
-        y - top
+        y + line_h + 14.0 - top
     }
 
     fn sec_head(&mut self, c: &mut Canvas, f: &mut Fonts, x0: f32, y: f32, text: &str) -> f32 {
@@ -781,7 +806,7 @@ impl AppWin {
         if on {
             draw_logo(c);
         } else {
-            c.layer(0.55, Filter { grayscale: 0.9, brightness: 1.0 }, None, 0.0, draw_logo);
+            c.layer_in(logo, 0.55, Filter { grayscale: 0.9, brightness: 1.0 }, draw_logo);
         }
         let nx = hx + 32.0 + 11.0;
         let ns = Style::new(13.5, 600, TEXT, 1.4);
@@ -860,7 +885,7 @@ impl AppWin {
                         draw_chip(c, f);
                         self.hits.push((r, hit));
                     } else {
-                        c.layer(0.45, Filter::NONE, None, 0.0, |c| draw_chip(c, f));
+                        c.layer_in(r, 0.45, Filter::NONE, |c| draw_chip(c, f));
                     }
                 }
             }
@@ -956,7 +981,7 @@ impl AppWin {
             if action == Some("download") {
                 c.shadow(b, 8.0, 0.0, 2.0, 10.0, 0.0, ACCENT.pct(0.35));
                 let fill = linear(135.0, b, &[(0.0, ACCENT), (1.0, ACCENT2)]);
-                c.layer(1.0, Filter { grayscale: 0.0, brightness: 1.0 + 0.1 * hv }, None, 0.0, |c| c.fill_rr(b, 8.0, fill));
+                c.layer_in(b, 1.0, Filter { grayscale: 0.0, brightness: 1.0 + 0.1 * hv }, |c| c.fill_rr(b, 8.0, fill));
                 f.draw(c, b.x + 12.0, b.cy() - ms.lh / 2.0, lb, &ms.color(Rgba::WHITE), None, 0.0);
             } else {
                 c.fill_rr(b, 8.0, SURFACE2.lerp(Rgba::hex(0x252937), hv));

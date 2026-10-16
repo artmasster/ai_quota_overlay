@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tiny_skia::Pixmap;
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WKey, NamedKey};
@@ -83,8 +83,7 @@ impl UnixHost {
             .with_active(kind == WinKind::App || kind == WinKind::Panel);
         if kind == WinKind::App {
             attrs = attrs
-                .with_resizable(true)
-                .with_min_inner_size(LogicalSize::new(380.0, 420.0))
+                .with_resizable(false)
                 .with_inner_size(os::size_for(self.el(), r))
                 .with_position(os::pos_for(self.el(), r));
         } else {
