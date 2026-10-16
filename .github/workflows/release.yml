@@ -7,6 +7,8 @@ name: Release
 on:
   push:
     tags: ['v*']
+    # Every push to main also builds the packages (no release), so packaging breaks show up early.
+    branches: [main]
   workflow_dispatch:
 
 permissions:
