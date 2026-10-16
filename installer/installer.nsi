@@ -107,7 +107,8 @@ FunctionEnd
     IntOp $R2 $R2 + 1
     ${If} $R2 == 20
       ${If} ${Silent}
-        nsExec::Exec 'taskkill /F /IM "${EXE}" /FI "USERNAME eq $%USERNAME%"'
+        ReadEnvStr $R5 USERNAME
+        nsExec::Exec 'taskkill /F /IM "${EXE}" /FI "USERNAME eq $R5"'
         Pop $R4
       ${Else}
         MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "$(AppRunning)" /SD IDCANCEL IDRETRY +2

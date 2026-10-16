@@ -23,25 +23,45 @@ cargo build --release --locked
 if ($LASTEXITCODE) { throw 'cargo build failed' }
 
 Write-Host '== sign on the Siam host'
-$remote = (ssh siam 'mktemp -d /tmp/aqo-release.XXXXXX').Trim()
+# The Siam host rate-limits SSH (about 6 connections per 30 s), so this uses four: upload, sign + package,
+# download, clean up.
+$id = -join ((48..57) + (97..122) | Get-Random -Count 10 | ForEach-Object { [char]$_ })
+$remote = "/tmp/aqo-release-$id"
+$stage = Join-Path ([IO.Path]::GetTempPath()) "aqo-release-$id"
+New-Item -ItemType Directory -Force $stage | Out-Null
+Copy-Item target\release\ai-quota-overlay.exe "$stage\aqo-$id-ai-quota-overlay.exe"
+Copy-Item installer\installer.nsi "$stage\aqo-$id-installer.nsi"
+Copy-Item build\icon.ico "$stage\aqo-$id-icon.ico"
+Copy-Item scripts\siam-sign.sh "$stage\aqo-$id-siam-sign.sh"
+$steps = @(
+        'set -e',
+        "mkdir -p $remote/installer $remote/build",
+        "mv /tmp/aqo-$id-ai-quota-overlay.exe $remote/ai-quota-overlay.exe",
+        "mv /tmp/aqo-$id-installer.nsi $remote/installer/installer.nsi",
+        "mv /tmp/aqo-$id-icon.ico $remote/build/icon.ico",
+        "mv /tmp/aqo-$id-siam-sign.sh $remote/siam-sign.sh",
+        "bash $remote/siam-sign.sh $remote/ai-quota-overlay.exe",
+        "cd $remote/installer",
+        "makensis -V2 -DVERSION=$version -DEXE_PATH=$remote/ai-quota-overlay.exe -DOUTFILE=$remote/$setup '-DSIGN_UNINSTALLER=bash $remote/siam-sign.sh' installer.nsi",
+    "bash $remote/siam-sign.sh $remote/$setup",
+    ''
+) -join "`n"
+# LF line endings: the steps run under bash on the host.
+[IO.File]::WriteAllText("$stage\aqo-$id-steps.sh", $steps)
 try {
-    ssh siam "mkdir -p $remote/installer $remote/build"
-    scp -q target\release\ai-quota-overlay.exe "siam:$remote/ai-quota-overlay.exe"
-    scp -q installer\installer.nsi "siam:$remote/installer/installer.nsi"
-    scp -q build\icon.ico "siam:$remote/build/icon.ico"
-    scp -q scripts\siam-sign.sh "siam:$remote/siam-sign.sh"
-    ssh siam "bash $remote/siam-sign.sh $remote/ai-quota-overlay.exe"
-    if ($LASTEXITCODE) { throw 'signing the exe failed' }
-    ssh siam "cd $remote/installer && makensis -V2 -DVERSION=$version -DEXE_PATH=$remote/ai-quota-overlay.exe -DOUTFILE=$remote/$setup '-DSIGN_UNINSTALLER=bash $remote/siam-sign.sh' installer.nsi"
-    if ($LASTEXITCODE) { throw 'makensis failed' }
-    ssh siam "bash $remote/siam-sign.sh $remote/$setup"
-    if ($LASTEXITCODE) { throw 'signing the installer failed' }
+    scp -q (Get-ChildItem $stage).FullName 'siam:/tmp/'
+    if ($LASTEXITCODE) { throw 'upload failed' }
+    ssh siam "bash /tmp/aqo-$id-steps.sh"
+    if ($LASTEXITCODE) { throw 'signing or packaging on the Siam host failed' }
     New-Item -ItemType Directory -Force dist | Out-Null
-    scp -q "siam:$remote/$setup" "dist\$setup"
-    scp -q "siam:$remote/ai-quota-overlay.exe" "dist\ai-quota-overlay-$version-signed.exe"
+    scp -q "siam:$remote/$setup" "siam:$remote/ai-quota-overlay.exe" $stage
+    if ($LASTEXITCODE) { throw 'download failed' }
+    Copy-Item "$stage\$setup" "dist\$setup" -Force
+    Copy-Item "$stage\ai-quota-overlay.exe" "dist\ai-quota-overlay-$version-signed.exe" -Force
 }
 finally {
-    ssh siam "rm -rf $remote"
+    ssh siam "rm -rf $remote /tmp/aqo-$id-*"
+    Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
 }
 
 Write-Host '== check signatures'
