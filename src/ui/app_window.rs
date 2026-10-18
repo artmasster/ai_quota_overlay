@@ -46,6 +46,7 @@ pub enum Hit {
     Visible,
     Lang(Lang),
     Layout(bool),
+    Size(&'static str),
     Slider,
     Startup,
     Network,
@@ -71,6 +72,7 @@ pub enum Action {
     Lang(Lang),
     Visible(bool),
     Vertical(bool),
+    Size(&'static str),
     Opacity(f64),
     Network(bool),
     Startup(bool),
@@ -325,6 +327,7 @@ impl AppWin {
                     Hit::Visible => out.push(Action::Visible(!ctx.visible)),
                     Hit::Lang(l) => out.push(Action::Lang(l)),
                     Hit::Layout(v) => out.push(Action::Vertical(v)),
+                    Hit::Size(k) => out.push(Action::Size(k)),
                     Hit::Startup => out.push(Action::Startup(!ctx.startup.unwrap_or(false))),
                     Hit::Network => out.push(Action::Network(!s.network)),
                     Hit::Service(svc) => out.push(Action::Service(svc, !s.services[svc.index()])),
@@ -498,6 +501,19 @@ impl AppWin {
         });
         rows.push(y);
         y += 1.0;
+        // Size
+        let size = ctx.settings.size.as_str();
+        y += self.row(c, f, x0, y, cw, &icons::SIZE, s.s.size, None, &mut |me, c, f, right, mid| {
+            let labels = [s.s.small, s.s.medium, s.s.large];
+            let items: Vec<(Option<&Icon>, &str, Hit, bool)> = crate::settings::SIZES
+                .iter()
+                .zip(labels)
+                .map(|((k, _), label)| (None, label, Hit::Size(k), *k == size))
+                .collect();
+            me.seg(c, f, right, mid, &items)
+        });
+        rows.push(y);
+        y += 1.0;
         // Opacity
         let value = self.slider_value.unwrap_or(ctx.settings.opacity);
         y += self.row(c, f, x0, y, cw, &icons::OPACITY, s.s.opacity, None, &mut |me, c, f, right, mid| {
@@ -515,13 +531,8 @@ impl AppWin {
                 (38.0, 22.0)
             });
         }
-        y += 1.0;
-        self.group_frame(c, x0, rows_y, cw, y - rows_y, &rows);
-
-        // ---------- Internet status ----------
-        y += GAP;
-        y = self.sec_head(c, f, x0, y, s.s.network);
-        let gy = y;
+        // Internet status (its own section before the size option; folded in so everything still fits)
+        rows.push(y);
         y += 1.0;
         let net_on = ctx.settings.network;
         let pos = self.switch_pos(Sw::Network, net_on);
@@ -548,7 +559,7 @@ impl AppWin {
         });
         self.net_rect = R::new(x0, net_y, cw, y - net_y);
         y += 1.0;
-        self.group_frame(c, x0, gy, cw, y - gy, &[]);
+        self.group_frame(c, x0, rows_y, cw, y - rows_y, &rows);
 
         let left_end = y;
 

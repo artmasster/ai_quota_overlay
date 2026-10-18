@@ -33,11 +33,10 @@ const NET_EVERY: Duration = Duration::from_secs(3);
 const NET_TIMEOUT: Duration = Duration::from_millis(2500);
 const NET_URLS: [&str; 2] = ["https://www.gstatic.com/generate_204", "https://1.1.1.1/cdn-cgi/trace"];
 const MARGIN: f64 = 16.0;
-/// The whole overlay is drawn at this zoom: CSS px × SCALE = DIP.
-pub const SCALE: f64 = 1.2;
-/// The card and the panel sit PAD inside their windows (room for the panel's outline) and GAP apart on screen.
-const PAD: f64 = 2.0 * SCALE;
-const GAP: f64 = 4.0 * SCALE;
+/// The card and the panel sit 2 CSS px inside their windows (room for the panel's outline) and 4 CSS px apart on
+/// screen; the overlay is drawn at the zoom of the chosen size (CSS px × zoom = DIP, `Settings::zoom`).
+const PAD_CSS: f64 = 2.0;
+const GAP_CSS: f64 = 4.0;
 /// Ring labels and reset times count down.
 const RELABEL: Duration = Duration::from_secs(30);
 const FRAME: Duration = Duration::from_millis(16);
@@ -374,6 +373,14 @@ impl App {
         ds.iter().cloned().min_by(|a, b| dist(a).total_cmp(&dist(b))).unwrap_or_else(|| h.primary())
     }
 
+    /// Moves the card back inside the work area of the display it is on (after it grew).
+    fn keep_on_screen(&mut self, h: &dyn Host) {
+        let (cx, cy) = (self.card.0 + self.card_size.0 / 2.0, self.card.1 + self.card_size.1 / 2.0);
+        let a = self.display_near(h, cx.round(), cy.round()).work;
+        self.card.0 = self.card.0.min(a.x + a.w - self.card_size.0).max(a.x);
+        self.card.1 = self.card.1.min(a.y + a.h - self.card_size.1).max(a.y);
+    }
+
     /// The panel opens toward the middle of the display the card is on.
     fn update_anchor(&mut self, h: &dyn Host) {
         let cx = self.card.0 + self.card_size.0 / 2.0;
@@ -383,15 +390,27 @@ impl App {
         self.anchor_bottom = cy > a.y + a.h / 2.0;
     }
 
-    /// Window bounds for a box at `pos` of `size`, with PAD to spare around it.
-    fn around(pos: (f64, f64), size: (f64, f64)) -> RectD {
-        RectD::new((pos.0 - PAD).round(), (pos.1 - PAD).round(), (size.0 + 2.0 * PAD).ceil(), (size.1 + 2.0 * PAD).ceil())
+    /// The overlay's zoom (CSS px → DIP) and the padding around the card and panel inside their windows (DIP).
+    fn zoom(&self) -> f64 {
+        self.settings.zoom()
+    }
+
+    fn pad(&self) -> f64 {
+        PAD_CSS * self.zoom()
+    }
+
+    /// Window bounds for a box at `pos` of `size`, with the padding to spare around it.
+    fn around(&self, pos: (f64, f64), size: (f64, f64)) -> RectD {
+        let pad = self.pad();
+        RectD::new((pos.0 - pad).round(), (pos.1 - pad).round(), (size.0 + 2.0 * pad).ceil(), (size.1 + 2.0 * pad).ceil())
     }
 
     /// Above/below the card when horizontal, beside it when vertical, aligned to the card edge facing the screen
     /// border. The detail panel and the update toast both open there (the toast steps aside while a panel is open).
     fn popup_pos(&self, size: (f64, f64)) -> (f64, f64) {
         let (c, cs) = (self.card, self.card_size);
+        #[allow(non_snake_case)]
+        let GAP = GAP_CSS * self.zoom();
         if self.settings.vertical {
             (
                 if self.anchor_right { c.0 - GAP - size.0 } else { c.0 + cs.0 + GAP },
@@ -771,7 +790,7 @@ impl App {
     // ---------- card mouse ----------
 
     fn card_mouse(&mut self, h: &mut dyn Host, m: Mouse, x: f64, y: f64) {
-        let (cx, cy) = ((x - PAD) / SCALE, (y - PAD) / SCALE);
+        let (cx, cy) = ((x - self.pad()) / self.zoom(), (y - self.pad()) / self.zoom());
         let hit = self.card_layout.as_ref().and_then(|l| l.hit(cx as f32, cy as f32));
         match m {
             Mouse::Move => {
@@ -854,7 +873,7 @@ impl App {
     // ---------- panel mouse ----------
 
     fn panel_mouse(&mut self, h: &mut dyn Host, m: Mouse, x: f64, y: f64) {
-        let (px, py) = ((x - PAD) / SCALE, (y - PAD) / SCALE);
+        let (px, py) = ((x - self.pad()) / self.zoom(), (y - self.pad()) / self.zoom());
         let on_close = self.panel_layout.as_ref().is_some_and(|l| l.close.contains(px as f32, py as f32));
         match m {
             Mouse::Move | Mouse::Leave => {
@@ -875,7 +894,7 @@ impl App {
     // ---------- toast mouse ----------
 
     fn toast_mouse(&mut self, h: &mut dyn Host, m: Mouse, x: f64, y: f64) {
-        let (tx, ty) = ((x - PAD) / SCALE, (y - PAD) / SCALE);
+        let (tx, ty) = ((x - self.pad()) / self.zoom(), (y - self.pad()) / self.zoom());
         let hit = self.toast_layout.as_ref().and_then(|l| l.hit(tx as f32, ty as f32));
         match m {
             Mouse::Move | Mouse::Leave => {
@@ -1021,6 +1040,20 @@ impl App {
                 self.settings.vertical = v;
                 self.select(None);
             }
+            AppAction::Size(k) => {
+                if self.settings.size == k {
+                    return;
+                }
+                self.settings.size = k.to_string();
+                self.select(None);
+                // The corner the card is anchored to stays put; then keep it on its display and remember it.
+                self.layout_card();
+                self.keep_on_screen(h);
+                if self.settings.card.is_some() {
+                    self.settings.card = Some(CardPos { x: self.card.0, y: self.card.1, w: Some(self.card_size.0), h: Some(self.card_size.1) });
+                }
+                self.update_anchor(h);
+            }
             AppAction::Opacity(v) => {
                 // Only the overlay's alpha and the slider change: the app window repaints just the slider.
                 self.settings.opacity = (v.clamp(0.3, 1.0) * 100.0).round() / 100.0;
@@ -1105,7 +1138,7 @@ impl App {
                 self.dirty_toast = true;
             }
         }
-        let size = (((l.w as f64) * SCALE).ceil(), ((l.h as f64) * SCALE).ceil());
+        let size = (((l.w as f64) * self.zoom()).ceil(), ((l.h as f64) * self.zoom()).ceil());
         if size != self.card_size {
             if self.anchor_right {
                 self.card.0 += self.card_size.0 - size.0;
@@ -1123,8 +1156,9 @@ impl App {
     fn render_card(&mut self, h: &dyn Host) -> Option<Pixmap> {
         self.layout_card();
         let l = self.card_layout.take()?;
-        let r = Self::around(self.card, self.card_size);
+        let r = self.around(self.card, self.card_size);
         let (scale, pw, ph) = h.device_size(WinKind::Card, r);
+        let zoom = self.zoom();
         let mut pm = Pixmap::new(pw.max(1), ph.max(1))?;
         let fx = CardFx {
             hover: self.card_hover.map(),
@@ -1134,7 +1168,7 @@ impl App {
         };
         {
             let inp = Self::card_in(&self.settings, &self.last, self.net, self.selected);
-            let mut c = Canvas::new(&mut pm, (scale * SCALE) as f32, 2.0, 2.0);
+            let mut c = Canvas::new(&mut pm, (scale * zoom) as f32, PAD_CSS as f32, PAD_CSS as f32);
             card::draw(&mut c, &mut self.fonts, &l, &inp, &fx);
         }
         self.card_layout = Some(l);
@@ -1185,7 +1219,7 @@ impl App {
         if self.visible && self.dirty_card {
             self.dirty_card = false;
             if let Some(pm) = self.render_card(h) {
-                let r = Self::around(self.card, self.card_size);
+                let r = self.around(self.card, self.card_size);
                 h.present(WinKind::Card, r, &pm, self.alpha(), false);
             }
         }
@@ -1335,10 +1369,11 @@ impl App {
         let lang = self.lang();
         let inp = PanelIn { lang, svc, q: &q, index, now: now_ms() };
         let l = panel::layout(&mut self.fonts, &inp);
-        let size = ((panel::W as f64 * SCALE).ceil(), (l.h as f64 * SCALE).ceil());
+        let size = ((panel::W as f64 * self.zoom()).ceil(), (l.h as f64 * self.zoom()).ceil());
         self.panel_size = size;
-        let r = Self::around(self.popup_pos(size), size);
+        let r = self.around(self.popup_pos(size), size);
         let (scale, pw, ph) = h.device_size(WinKind::Panel, r);
+        let zoom = self.zoom();
         let Some(mut pm) = Pixmap::new(pw.max(1), ph.max(1)) else { return false };
         // @keyframes pop .14s ease-out: from opacity 0, scale .97.
         let (k, animating) = match self.panel_pop {
@@ -1353,7 +1388,7 @@ impl App {
         };
         {
             let fx = PanelFx { close_hover: self.panel_hover.get(0) };
-            let mut c = Canvas::new(&mut pm, (scale * SCALE) as f32, 2.0, 2.0);
+            let mut c = Canvas::new(&mut pm, (scale * zoom) as f32, PAD_CSS as f32, PAD_CSS as f32);
             let (cx, cy) = (panel::W / 2.0, l.h / 2.0);
             let fonts = &mut self.fonts;
             if k < 1.0 {
@@ -1392,10 +1427,11 @@ impl App {
             error: &error,
         };
         let l = toast::layout(&mut self.fonts, &inp);
-        let size = ((toast::W as f64 * SCALE).ceil(), (l.h as f64 * SCALE).ceil());
+        let size = ((toast::W as f64 * self.zoom()).ceil(), (l.h as f64 * self.zoom()).ceil());
         self.toast_size = size;
-        let r = Self::around(self.popup_pos(size), size);
+        let r = self.around(self.popup_pos(size), size);
         let (scale, pw, ph) = h.device_size(WinKind::Toast, r);
+        let zoom = self.zoom();
         let Some(mut pm) = Pixmap::new(pw.max(1), ph.max(1)) else { return false };
         // @keyframes pop .18s ease-out: from opacity 0, 4 px lower, scale .98.
         let (k, animating) = match self.toast_pop {
@@ -1416,7 +1452,7 @@ impl App {
                 t: self.toast_t0.elapsed().as_secs_f32(),
                 bar: self.toast_bar,
             };
-            let mut c = Canvas::new(&mut pm, (scale * SCALE) as f32, 2.0, 2.0);
+            let mut c = Canvas::new(&mut pm, (scale * zoom) as f32, PAD_CSS as f32, PAD_CSS as f32);
             let fonts = &mut self.fonts;
             let (cx, cy) = (toast::W / 2.0, l.h / 2.0);
             if k < 1.0 {

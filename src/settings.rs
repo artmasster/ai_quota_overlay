@@ -1,5 +1,6 @@
 //! settings.json in the same folder and shape the Electron app used (`app.getPath('userData')`), so existing
 //! users keep their settings: card, opacity, vertical, lang, network, services, hidden, seen, skipVersion.
+//! 2.x adds `size` (small / medium / large overlay).
 use crate::model::{Svc, Win, SERVICES};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -24,6 +25,8 @@ pub struct Settings {
     pub card: Option<CardPos>,
     pub opacity: f64,
     pub vertical: bool,
+    /// Overlay size: "small", "medium" or "large" (see `zoom`).
+    pub size: String,
     pub lang: String,
     pub network: bool,
     pub services: [bool; 3],
@@ -42,6 +45,7 @@ impl Default for Settings {
             card: None,
             opacity: 0.92,
             vertical: false,
+            size: "medium".into(),
             lang: "en".into(),
             network: false,
             services: [true; 3],
@@ -79,7 +83,15 @@ fn file() -> PathBuf {
     data_dir().join("settings.json")
 }
 
+/// Overlay sizes and their zoom (CSS px × zoom = DIP). Medium is the size every version so far had.
+pub const SIZES: [(&str, f64); 3] = [("small", 1.0), ("medium", 1.2), ("large", 1.45)];
+
 impl Settings {
+    /// The overlay's zoom for the chosen size.
+    pub fn zoom(&self) -> f64 {
+        SIZES.iter().find(|(k, _)| *k == self.size).map_or(1.2, |(_, z)| *z)
+    }
+
     pub fn load() -> Self {
         Self::parse(&std::fs::read_to_string(file()).unwrap_or_default())
     }
@@ -97,6 +109,11 @@ impl Settings {
         }
         if let Some(v) = m.remove("vertical").and_then(|v| v.as_bool()) {
             s.vertical = v;
+        }
+        if let Some(v) = m.remove("size").and_then(|v| v.as_str().map(String::from)) {
+            if SIZES.iter().any(|(k, _)| *k == v) {
+                s.size = v;
+            }
         }
         if let Some(v) = m.remove("lang").and_then(|v| v.as_str().map(String::from)) {
             s.lang = v;
@@ -159,6 +176,8 @@ impl Settings {
         }
         m.insert("seen".into(), Value::Object(seen));
         m.insert("skipVersion".into(), self.skip_version.clone().map(Value::from).unwrap_or(Value::Null));
+        // Keys added after Electron come after its own.
+        m.insert("size".into(), Value::from(self.size.clone()));
         // Unknown keys go last so the known ones keep the old order.
         let ordered: BTreeMap<_, _> = self.other.clone().into_iter().collect();
         for (k, v) in ordered {
@@ -177,6 +196,16 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn size_defaults_to_medium() {
+        assert_eq!(Settings::parse("{}").size, "medium");
+        assert_eq!(Settings::parse("{}").zoom(), 1.2);
+        assert_eq!(Settings::parse(r#"{"size":"huge"}"#).size, "medium");
+        let s = Settings::parse(r#"{"size":"large"}"#);
+        assert_eq!(s.zoom(), 1.45);
+        assert_eq!(s.to_json()["size"], "large");
+    }
 
     #[test]
     fn reads_and_writes_the_electron_shape() {

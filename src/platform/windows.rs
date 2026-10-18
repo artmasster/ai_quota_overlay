@@ -1326,6 +1326,49 @@ mod tests {
     }
 
     #[test]
+    fn every_card_size_crosses_between_100_and_125_percent_cleanly() {
+        // The owner's 2K at 100 % with a 4K at 125 % to its right; drag cards of every size (horizontal and
+        // vertical shapes, CSS px × zoom) across the seam one DIP at a time.
+        let mut v = vec![mon(0, 0, 2560, 1440, 1.0, true), mon(2560, 0, 6400, 2160, 1.25, false)];
+        layout_dip(&mut v);
+        DISPLAYS.with(|d| *d.borrow_mut() = v.clone());
+        for (_, zoom) in crate::settings::SIZES {
+            for (cw, ch) in [(228.0, 80.0), (62.0, 300.0)] {
+                let (w, h) = ((cw * zoom as f64).ceil(), (ch * zoom as f64).ceil());
+                let mut last: Option<(RECT, f64)> = None;
+                let mut switches = 0;
+                let mut x = 2560.0 - w - 20.0;
+                while x <= 2580.0 {
+                    let r = RectD::new(x, 300.0, w, h);
+                    let (p, scale) = to_phys(r);
+                    // The window takes the scale of the display holding most of it (the right one on a tie).
+                    let on_right = x + w - 2560.0 >= 2560.0 - x;
+                    assert_eq!(scale, if on_right { 1.25 } else { 1.0 }, "zoom {zoom} x {x}");
+                    // Its size is exactly the DIP size at that scale: nothing grows while dragging.
+                    assert_eq!(p.right - p.left, (w * scale).round() as i32);
+                    assert_eq!(p.bottom - p.top, (h * scale).round() as i32);
+                    if let Some((lp, ls)) = last {
+                        let step = p.left - lp.left;
+                        if ls == scale {
+                            // One DIP right is one to two device px right, never backwards.
+                            assert!((1..=2).contains(&step), "zoom {zoom} x {x} step {step}");
+                        } else {
+                            // At the handover the window moves by the scale difference of the part still on the
+                            // left display (about half its width), at most.
+                            switches += 1;
+                            assert!(step.abs() as f64 <= (w / 2.0 + 1.0) * 0.25 + 2.0, "zoom {zoom} x {x} jump {step}");
+                        }
+                    }
+                    last = Some((p, scale));
+                    x += 1.0;
+                }
+                assert_eq!(switches, 1, "zoom {zoom}: the scale changes exactly once");
+            }
+        }
+        DISPLAYS.with(|d| d.borrow_mut().clear());
+    }
+
+    #[test]
     fn dip_of_a_point_uses_its_monitor() {
         let mut v = vec![mon(0, 0, 2560, 1440, 1.0, true), mon(2560, 0, 6400, 2160, 1.25, false)];
         layout_dip(&mut v);
