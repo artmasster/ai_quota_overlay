@@ -4,11 +4,13 @@
 //!
 //! Quota: checked every POLL while the card or the app window is on screen, every IDLE_POLL while both are hidden.
 //! Checks never overlap, manual refreshes closer than MIN_REFRESH_GAP reuse the last result, and a service that
-//! answers "too many requests" is left alone for BACKOFF (doubling up to MAX_BACKOFF) while it keeps showing its
-//! last good numbers, so checking often never turns into hammering anyone's API.
+//! answers "too many requests" is left alone for BACKOFF (doubling up to MAX_BACKOFF, longer when the server's
+//! Retry-After asks for it), so checking often never turns into hammering anyone's API. A double-click tries such a
+//! service again at once, unless the server's own wait still holds. While a check fails (other than an expired
+//! login) the service keeps showing its last good numbers, from this run or from quota.json, up to STALE_MAX old.
 use crate::anim::Fades;
 use crate::i18n::{self, Lang};
-use crate::model::{now_ms, NetState, Snapshot, Svc, SERVICES};
+use crate::model::{now_ms, NetState, QErr, Quota, Retry, Snapshot, Svc, SERVICES};
 use crate::settings::{CardPos, Settings};
 use crate::ui::app_window::{self, AppWin, Action as AppAction};
 use crate::ui::card::{self, CardFx, CardIn, Target};
@@ -27,6 +29,9 @@ const IDLE_POLL: Duration = Duration::from_secs(5 * 60);
 const MIN_REFRESH_GAP: Duration = Duration::from_secs(10);
 const BACKOFF_MS: i64 = 2 * 60 * 1000;
 const MAX_BACKOFF_MS: i64 = 15 * 60 * 1000;
+/// A Retry-After longer than this is taken as this.
+const MAX_SERVER_WAIT_MS: i64 = 60 * 60 * 1000;
+const STALE_MAX_MS: i64 = 12 * 60 * 60 * 1000;
 /// Internet check: online when any of these answers within NET_TIMEOUT. Any HTTP status counts, only a failed
 /// connection doesn't, so a captive portal or a blocked host still reads as online as long as one gets through.
 const NET_EVERY: Duration = Duration::from_secs(3);
@@ -186,6 +191,20 @@ pub enum Msg {
 
 pub type Fetcher = fn([bool; 3]) -> Snapshot;
 
+/// A service left alone after "too many requests": until when (unix ms), the current back-off, and the server's
+/// own Retry-After (0 = none), which a manual retry doesn't skip.
+#[derive(Clone, Copy, Debug)]
+struct Cool {
+    until: i64,
+    ms: i64,
+    server: i64,
+}
+
+/// An error the user has to fix (log in again): shown as is, never hidden behind old numbers.
+fn needs_login(e: &QErr) -> bool {
+    e.code.ends_with("Expired") || e.code.ends_with("ExpiredKeychain")
+}
+
 struct Drag {
     from_card: (f64, f64),
     from_cursor: (f64, f64),
@@ -205,7 +224,9 @@ pub struct App {
     last: Option<Snapshot>,
     last_fetch: Option<Instant>,
     refreshing: bool,
-    cooling: [Option<(i64, i64)>; 3],
+    cooling: [Option<Cool>; 3],
+    /// Each service's last good numbers (`as_of` = when fetched), also kept in quota.json.
+    good: [Option<Quota>; 3],
     net_busy: bool,
     net: Option<NetState>,
     next_net: Instant,
@@ -275,6 +296,7 @@ impl App {
             last_fetch: None,
             refreshing: false,
             cooling: [None; 3],
+            good: crate::cache::load(),
             net_busy: false,
             net: None,
             next_net: now,
@@ -555,7 +577,7 @@ impl App {
         let now = now_ms();
         let mut enabled = self.settings.services;
         for s in SERVICES {
-            if self.cooling[s.index()].is_some_and(|(until, _)| until > now) {
+            if self.cooling[s.index()].is_some_and(|c| c.until > now) {
                 enabled[s.index()] = false;
             }
         }
@@ -568,27 +590,70 @@ impl App {
         });
     }
 
+    /// A double-click on the card or "Refresh now": also tries services that are waiting out a "too many requests",
+    /// except while the server's own Retry-After holds.
+    fn retry_now(&mut self) {
+        let now = now_ms();
+        for c in self.cooling.iter_mut().flatten() {
+            if c.server <= now && c.until > now {
+                c.until = now - 1;
+            }
+        }
+        self.refresh(false);
+    }
+
+    fn retry_of(&self, i: usize, now: i64) -> Option<Retry> {
+        self.cooling[i].map(|c| Retry { at: c.until, manual: c.server <= now })
+    }
+
+    /// What to show for a service whose check failed with `err`: its last good numbers (if not too old and the
+    /// login is fine) carrying the error, else the error alone.
+    fn failed(&self, i: usize, err: QErr, now: i64) -> Quota {
+        let retry = self.retry_of(i, now);
+        let good = if needs_login(&err) { None } else { self.good[i].as_ref().and_then(|g| crate::cache::aged(g, now, STALE_MAX_MS)) };
+        match good {
+            Some(g) => Quota { error: Some(err), retry, ..g },
+            None => Quota { error: Some(err), retry, ..Quota::default() },
+        }
+    }
+
     fn on_quota(&mut self, h: &mut dyn Host, mut fresh: Snapshot) {
         let now = now_ms();
         let started = now - self.last_fetch.map(|t| t.elapsed().as_millis() as i64).unwrap_or(0);
+        let mut store = false;
         for s in SERVICES {
             let i = s.index();
-            let cooling = self.cooling[i].is_some_and(|(until, _)| until > started);
             if !self.settings.services[i] {
                 self.cooling[i] = None;
-            } else if cooling {
-                if let Some(prev) = self.last.as_ref().and_then(|l| l.svc[i].clone()) {
-                    fresh.svc[i] = Some(prev);
+                continue;
+            }
+            if self.cooling[i].is_some_and(|c| c.until > started) {
+                // Not checked this time: keep the last error, with the numbers aged and the next try updated.
+                let err = self.last.as_ref().and_then(|l| l.svc[i].as_ref()).and_then(|q| q.error.clone());
+                fresh.svc[i] = Some(self.failed(i, err.unwrap_or_else(|| QErr::rate_limited(None)), now));
+                continue;
+            }
+            let Some(q) = fresh.svc[i].clone() else { continue };
+            if q.ok || q.absent {
+                self.cooling[i] = None;
+                if q.ok {
+                    self.good[i] = Some(Quota { as_of: Some(fresh.fetched_at), ..q });
+                    store = true;
                 }
-            } else if fresh.svc[i].as_ref().is_some_and(|q| q.rate_limited()) {
-                let ms = (self.cooling[i].map(|(_, ms)| ms).unwrap_or(BACKOFF_MS / 2) * 2).min(MAX_BACKOFF_MS);
-                self.cooling[i] = Some((started + ms, ms));
-                if let Some(prev) = self.last.as_ref().and_then(|l| l.svc[i].clone()).filter(|q| q.ok) {
-                    fresh.svc[i] = Some(prev);
-                }
+                continue;
+            }
+            let err = q.error.clone().unwrap_or_default();
+            if q.rate_limited() {
+                let ms = (self.cooling[i].map(|c| c.ms).unwrap_or(BACKOFF_MS / 2) * 2).min(MAX_BACKOFF_MS);
+                let server = err.retry_at.map_or(0, |t| t.min(started + MAX_SERVER_WAIT_MS));
+                self.cooling[i] = Some(Cool { until: (started + ms).max(server), ms, server });
             } else {
                 self.cooling[i] = None;
             }
+            fresh.svc[i] = Some(self.failed(i, err, now));
+        }
+        if store {
+            crate::cache::save(&self.good);
         }
         self.last = Some(fresh);
         self.refreshing = false;
@@ -651,7 +716,11 @@ impl App {
                 .filter(|w| !hidden.contains(&w.id))
                 .map(|w| format!("{} {}%", i18n::window_label(w, lang, true), crate::ui::js_round(100.0 - w.used())))
                 .collect();
-            lines.push(format!("{} {}", s.name(), parts.join(" · ")));
+            let mut line = format!("{} {}", s.name(), parts.join(" · "));
+            if let Some(at) = q.as_of.filter(|_| q.stale()) {
+                line += &format!(" ({})", crate::fmt::time(at, lang));
+            }
+            lines.push(line);
         }
         let mut text = lines.join("\n");
         if text.is_empty() {
@@ -843,7 +912,7 @@ impl App {
             }
             Mouse::Dbl(Btn3::Left) => {
                 if !matches!(hit, Some(Target::Ring(..)) | Some(Target::More)) {
-                    self.refresh(false);
+                    self.retry_now();
                 }
             }
             // Right-click opens the app window, where all the settings and actions are.
@@ -1086,7 +1155,7 @@ impl App {
                 }
             }
             AppAction::Refresh => {
-                self.refresh(false);
+                self.retry_now();
                 return;
             }
             AppAction::Snap => {

@@ -2,7 +2,7 @@
 //! and the "⋯" button, laid out like the page's flexbox, horizontal or vertical.
 use super::gfx::{Canvas, Filter, Rgba, R};
 use super::text::{Fonts, Style};
-use super::{icons, js_round, left_label, level_color, svc_color, BAD, LINE, MUTED, OK, TEXT, TRACK};
+use super::{icons, js_round, left_label, level_color, svc_color, BAD, LINE, MUTED, OK, TEXT, TRACK, WARN};
 use crate::i18n::{self, Lang};
 use crate::model::{NetState, Snapshot, Svc, SERVICES};
 use std::collections::HashMap;
@@ -74,7 +74,8 @@ struct RingBox {
 
 enum Item {
     Net { r: R, online: bool, name_w: f32, lbl: String },
-    Svc { r: R, svc: Svc, name_w: f32, rings: Vec<RingBox>, divider: bool },
+    /// stale: old numbers shown because the latest check failed (a small amber dot after the name).
+    Svc { r: R, svc: Svc, name_w: f32, rings: Vec<RingBox>, divider: bool, stale: bool },
     Empty { r: R, text: String, after_net: bool },
     More { r: R },
 }
@@ -200,6 +201,7 @@ pub fn layout(f: &mut Fonts, inp: &CardIn) -> CardLayout {
                 // `.svc + .svc` counts the internet column too (it is a `.svc`).
                 let mut first = !matches!(items.last(), Some(Item::Net { .. }));
                 for (s, r, wins) in shown {
+                    let stale = r.stale();
                     let mut rings = Vec::new();
                     if !r.ok {
                         rings.push((Target::Ring(s, -1), 0.0, "!".to_string(), t.error.to_string()));
@@ -251,7 +253,7 @@ pub fn layout(f: &mut Fonts, inp: &CardIn) -> CardLayout {
                             }
                         }
                     }
-                    items.push(Item::Svc { r, svc: s, name_w, rings: boxes, divider });
+                    items.push(Item::Svc { r, svc: s, name_w, rings: boxes, divider, stale });
                 }
             }
             items.push(more_item());
@@ -410,7 +412,7 @@ pub fn draw(c: &mut Canvas, f: &mut Fonts, l: &CardLayout, inp: &CardIn, fx: &Ca
                 let lw = f.width(lbl, &ls);
                 f.draw(c, r.cx() - lw / 2.0, dot_cy + rad + 1.0, lbl, &ls, None, 0.0);
             }
-            Item::Svc { r, svc, name_w, rings, divider } => {
+            Item::Svc { r, svc, name_w, rings, divider, stale } => {
                 if *divider {
                     if l.vertical {
                         c.fill_rr(R::new(r.x, r.y, r.w, 1.0), 0.0, LINE);
@@ -427,6 +429,9 @@ pub fn draw(c: &mut Canvas, f: &mut Fonts, l: &CardLayout, inp: &CardIn, fx: &Ca
                     (inner_x + (inner_w - name_w) / 2.0, r.y)
                 };
                 f.draw(c, nx, ny, svc.name(), &ns, None, 0.0);
+                if *stale {
+                    c.fill_circle(nx + name_w + 3.5, ny + ns.lh / 2.0, 2.0, WARN);
+                }
                 for rb in rings {
                     draw_ring(c, f, rb, inp, fx);
                 }

@@ -167,6 +167,9 @@ pub(super) fn fetch(db: &Path) -> Res<Quota> {
 
     // Older request-count plans.
     let old = http::get(&format!("{OLD_USAGE_URL}{}", encode_uri_component(&user)), &headers)?;
+    if !old.ok() && (res.status == 429 || old.status == 429) {
+        return Err(FetchErr::Quota(QErr::rate_limited(res.retry_at.max(old.retry_at))));
+    }
     if !old.ok() {
         return Err(FetchErr::Quota(QErr::status("Cursor", format!("{}/{}", res.status, old.status))));
     }

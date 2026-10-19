@@ -235,7 +235,7 @@ pub(super) fn fetch(creds: &Path) -> Res<Quota> {
         res = call(access_token(creds, true)?)?;
     }
     if res.status == 429 {
-        return Err(qerr("rateLimited"));
+        return Err(FetchErr::Quota(QErr::rate_limited(res.retry_at)));
     }
     if !res.ok() {
         return Err(FetchErr::Quota(QErr::status("Claude", res.status)));

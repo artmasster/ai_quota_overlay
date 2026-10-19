@@ -30,6 +30,9 @@ pub(super) fn fetch(auth_file: &Path) -> Res<Quota> {
     if res.status == 401 {
         return Err(qerr("codexExpired"));
     }
+    if res.status == 429 {
+        return Err(FetchErr::Quota(QErr::rate_limited(res.retry_at)));
+    }
     if !res.ok() {
         return Err(FetchErr::Quota(QErr::status("Codex", res.status)));
     }

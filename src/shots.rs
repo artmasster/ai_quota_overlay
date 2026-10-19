@@ -88,7 +88,7 @@ pub fn run(dir: &Path) -> std::io::Result<()> {
     let built = crate::model::now_ms();
     let now = built + 2000;
     let hidden = demo_hidden();
-    let shots: Vec<(&str, Lang, bool, bool, Option<NetState>, Pop, Option<Quota>)> = vec![
+    let mut shots: Vec<(&str, Lang, bool, bool, Option<NetState>, Pop, Option<Quota>)> = vec![
         ("hero", Lang::En, false, false, None, Pop::Panel(Svc::Claude, 0), None),
         ("horizontal", Lang::En, false, false, None, Pop::None, None),
         ("vertical", Lang::En, true, false, None, Pop::Panel(Svc::Codex, 1), None),
@@ -110,6 +110,18 @@ pub fn run(dir: &Path) -> std::io::Result<()> {
         ("update-installing", Lang::En, false, false, None, Pop::Toast(Kind::Installing, 100), None),
         ("update-error", Lang::En, false, false, None, Pop::Toast(Kind::Error, 0), None),
     ];
+    // AQO_SHOT_EXTRA=1: also the "too many requests" states (not in the README).
+    if std::env::var_os("AQO_SHOT_EXTRA").is_some() {
+        let limited = |manual: bool| QErr { retry_at: (!manual).then_some(now + 40 * 60_000), ..QErr::rate_limited(None) };
+        let retry = |manual: bool| Some(crate::model::Retry { at: now + if manual { 4 } else { 40 } * 60_000, manual });
+        let bare = |manual: bool| Quota { retry: retry(manual), ..Quota::err(limited(manual)) };
+        let stale = Quota { error: Some(limited(true)), as_of: Some(now - 25 * 60_000), retry: retry(true), ..demo(built).svc[0].clone().unwrap_or_default() };
+        for (lang, [a, b, c]) in [(Lang::En, ["limited-en", "limited-wait-en", "stale-en"]), (Lang::Th, ["limited-th", "limited-wait-th", "stale-th"])] {
+            shots.push((a, lang, false, false, None, Pop::Panel(Svc::Claude, -1), Some(bare(true))));
+            shots.push((b, lang, false, false, None, Pop::Panel(Svc::Claude, -1), Some(bare(false))));
+            shots.push((c, lang, false, false, None, Pop::Panel(Svc::Claude, 0), Some(stale.clone())));
+        }
+    }
     for (name, lang, vertical, network, net, pop, claude_override) in shots {
         let mut data = demo(built);
         if let Some(q) = claude_override {

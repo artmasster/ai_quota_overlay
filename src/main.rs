@@ -2,6 +2,7 @@
 
 mod anim;
 mod app;
+mod cache;
 mod fmt;
 mod http;
 mod i18n;

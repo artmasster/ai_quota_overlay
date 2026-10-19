@@ -375,6 +375,22 @@ pub fn current(l: Lang, v: &str) -> String {
         Lang::Th => format!("เวอร์ชันปัจจุบัน v{v}"),
     }
 }
+/// Old numbers shown because the latest check failed.
+pub fn as_of(l: Lang, when: &str) -> String {
+    match l {
+        Lang::En => format!("Numbers from {when}"),
+        Lang::Th => format!("ตัวเลขเมื่อ {when}"),
+    }
+}
+/// The next automatic try after "too many requests"; manual = a double-click may try now.
+pub fn retry_at(l: Lang, time: &str, manual: bool) -> String {
+    match (l, manual) {
+        (Lang::En, true) => format!("Tries again by itself at {time} · double-click the card to try now"),
+        (Lang::En, false) => format!("The server asked to wait · tries again by itself at {time}"),
+        (Lang::Th, true) => format!("จะลองใหม่เองตอน {time} · ดับเบิลคลิกที่กล่องเพื่อลองตอนนี้"),
+        (Lang::Th, false) => format!("เซิร์ฟเวอร์ขอให้รอ · จะลองใหม่เองตอน {time}"),
+    }
+}
 pub fn updated(l: Lang, time: &str) -> String {
     match l {
         Lang::En => format!("Updated {time}"),
@@ -416,7 +432,7 @@ pub fn error_text(e: &QErr, l: Lang) -> String {
         (Lang::En, "offline") => "Can't reach the internet".into(),
         (Lang::En, "claudeExpired") => format!("Login expired ({status}) — run claude in a terminal, then /login"),
         (Lang::En, "claudeExpiredKeychain") => "Login expired — open claude in a terminal once".into(),
-        (Lang::En, "rateLimited") => "Checking too often, try again shortly".into(),
+        (Lang::En, "rateLimited") => "Too many requests (429), waiting a bit".into(),
         (Lang::En, "status") => format!("{service} returned {status}"),
         (Lang::En, "codexExpired") => "Login expired — open the Codex app once".into(),
         (Lang::En, "cursorExpired") => "Login expired — open the Cursor app once".into(),
@@ -424,7 +440,7 @@ pub fn error_text(e: &QErr, l: Lang) -> String {
         (Lang::Th, "offline") => "ต่ออินเทอร์เน็ตไม่ได้".into(),
         (Lang::Th, "claudeExpired") => format!("login หมดอายุ ({status}) — เปิด terminal พิมพ์ claude แล้ว /login"),
         (Lang::Th, "claudeExpiredKeychain") => "login หมดอายุ — เปิด claude ใน terminal สักครั้ง".into(),
-        (Lang::Th, "rateLimited") => "ถูกจำกัดการเช็ค รอสักครู่".into(),
+        (Lang::Th, "rateLimited") => "ถูกจำกัดการเช็ค (429) รอสักครู่".into(),
         (Lang::Th, "status") => format!("{service} ตอบ {status}"),
         (Lang::Th, "codexExpired") => "login หมดอายุ — เปิดแอป Codex สักครั้ง".into(),
         (Lang::Th, "cursorExpired") => "login หมดอายุ — เปิดแอป Cursor สักครั้ง".into(),

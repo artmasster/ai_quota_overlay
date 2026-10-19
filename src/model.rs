@@ -67,6 +67,8 @@ pub struct QErr {
     pub status: Option<String>,
     pub service: Option<String>,
     pub message: Option<String>,
+    /// Unix ms the server asked us not to call before (`Retry-After`).
+    pub retry_at: Option<i64>,
 }
 
 impl QErr {
@@ -76,6 +78,18 @@ impl QErr {
     pub fn status(service: &str, status: impl ToString) -> Self {
         Self { code: "status".into(), service: Some(service.into()), status: Some(status.to_string()), ..Self::default() }
     }
+    /// "Too many requests", with the server's `Retry-After` when it sent one.
+    pub fn rate_limited(retry_at: Option<i64>) -> Self {
+        Self { code: "rateLimited".into(), retry_at, ..Self::default() }
+    }
+}
+
+/// When the app checks a service again by itself (unix ms); `manual` = a double-click may try sooner
+/// (false while the server's own `Retry-After` still holds).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Retry {
+    pub at: i64,
+    pub manual: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -95,7 +109,12 @@ pub struct Quota {
     pub extra: Option<Extra>,
     pub credits: Option<f64>,
     pub limit_reached: bool,
+    /// With `ok`: the latest check failed with this, and the numbers are the last good ones (see `as_of`).
     pub error: Option<QErr>,
+    /// Unix ms the numbers were fetched, when they come from an earlier check (or the cache on disk).
+    pub as_of: Option<i64>,
+    /// Set while the service is left alone after "too many requests".
+    pub retry: Option<Retry>,
 }
 
 impl Quota {
@@ -110,6 +129,10 @@ impl Quota {
     }
     pub fn rate_limited(&self) -> bool {
         self.error.as_ref().is_some_and(|e| e.code == "rateLimited" || e.status.as_deref() == Some("429"))
+    }
+    /// Old numbers kept on screen because the latest check failed.
+    pub fn stale(&self) -> bool {
+        self.ok && self.as_of.is_some()
     }
 }
 

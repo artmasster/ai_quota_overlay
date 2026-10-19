@@ -200,7 +200,19 @@ fn parse_only(var: Option<&str>) -> Option<Vec<String>> {
     var.map(|s| s.to_lowercase().split(',').map(|k| k.trim().to_string()).collect())
 }
 
+/// Dev aid: `QUOTA_OVERLAY_FAKE_429=claude:90,codex` → those services answer "too many requests" (with a
+/// Retry-After of 90 s for Claude) without sending anything.
+fn fake_429(var: Option<&str>, s: Svc, now: i64) -> Option<Quota> {
+    let item = var?.split(',').map(str::trim).find(|i| i.split(':').next().is_some_and(|k| k.eq_ignore_ascii_case(s.key())))?;
+    let secs = item.split(':').nth(1).and_then(|v| v.trim().parse::<i64>().ok());
+    Some(settle(Err(FetchErr::Quota(QErr::rate_limited(secs.map(|v| now + v * 1000))))))
+}
+
 fn fetch_one(s: Svc) -> Quota {
+    if let Some(q) = fake_429(std::env::var("QUOTA_OVERLAY_FAKE_429").ok().as_deref(), s, now_ms()) {
+        crate::http::log_request("FAKE429", s.key());
+        return q;
+    }
     settle(match s {
         Svc::Claude => claude::fetch(&claude_creds_path()),
         Svc::Codex => codex::fetch(&codex_auth_path()),
@@ -237,6 +249,15 @@ mod tests {
         assert_eq!(parse_only(Some("cursor")), Some(vec!["cursor".to_string()]));
         // Set but empty checks nothing, as in JS.
         assert_eq!(parse_only(Some("")), Some(vec![String::new()]));
+    }
+
+    #[test]
+    fn fake_429_env() {
+        assert_eq!(fake_429(None, Svc::Claude, 0), None);
+        let q = fake_429(Some("codex, Claude:90"), Svc::Claude, 1_000).unwrap();
+        assert!(q.rate_limited() && q.error.unwrap().retry_at == Some(91_000));
+        assert_eq!(fake_429(Some("codex"), Svc::Codex, 0).unwrap().error.unwrap().retry_at, None);
+        assert_eq!(fake_429(Some("codex"), Svc::Cursor, 0), None);
     }
 
     #[test]

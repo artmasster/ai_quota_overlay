@@ -826,7 +826,8 @@ impl AppWin {
                 false,
             )
         } else if !wins.is_empty() {
-            let err = r.as_ref().filter(|q| !q.ok).and_then(|q| q.error.as_ref()).map(|e| i18n::error_text(e, ctx.lang));
+            // Also when old numbers are shown because the latest check failed.
+            let err = r.as_ref().and_then(|q| q.error.as_ref()).map(|e| i18n::error_text(e, ctx.lang));
             Body::Chips(if on { err } else { None })
         } else if let Some(e) = r.as_ref().filter(|q| on && !q.ok).and_then(|q| q.error.as_ref()) {
             Body::Note(i18n::error_text(e, ctx.lang), true)
@@ -919,7 +920,7 @@ impl AppWin {
             match &r {
                 None => (s.s.checking, FAINT, MUTED),
                 Some(q) if q.absent => (s.s.absent, FAINT, MUTED),
-                Some(q) if !q.ok => (s.s.failed, WARN, WARN),
+                Some(q) if !q.ok || q.error.is_some() => (s.s.failed, WARN, WARN),
                 Some(_) => (s.s.connected, OK, MUTED),
             }
         };

@@ -28,6 +28,8 @@ pub struct PanelFx {
 pub struct PanelLayout {
     pub h: f32,
     pub close: R,
+    /// Top of the note under old numbers (`Quota::stale`).
+    foot: Option<f32>,
 }
 
 fn head_name() -> Style {
@@ -50,6 +52,25 @@ fn cap_style() -> Style {
 }
 fn row_style() -> Style {
     Style::new(11.5, 400, TEXT, 1.3)
+}
+
+/// What happens next: the automatic retry after "too many requests", else the double-click hint.
+fn next_hint(inp: &PanelIn) -> String {
+    match inp.q.retry {
+        Some(r) => i18n::retry_at(inp.lang, &fmt::time(r.at, inp.lang), r.manual),
+        None => i18n::t(inp.lang).retry_hint.to_string(),
+    }
+}
+
+/// Under old numbers: why they are old, then since when and what happens next.
+fn foot_texts(inp: &PanelIn) -> (String, String) {
+    let err = inp.q.error.as_ref().map(|e| i18n::error_text(e, inp.lang)).unwrap_or_default();
+    let when = fmt::when(inp.q.as_of.unwrap_or(inp.now), inp.now, inp.lang);
+    (err, format!("{} · {}", i18n::as_of(inp.lang, &when), next_hint(inp)))
+}
+
+fn foot_err_style() -> Style {
+    Style::new(11.0, 400, WARN, 1.4)
 }
 
 fn window<'a>(inp: &PanelIn<'a>) -> Option<&'a crate::model::Win> {
@@ -78,12 +99,11 @@ fn rows(inp: &PanelIn) -> Vec<(super::svg::Icon, String, String, String, String)
 }
 
 pub fn layout(f: &mut Fonts, inp: &PanelIn) -> PanelLayout {
-    let t = i18n::t(inp.lang);
     let mut y = 11.0 + 20.0 + 8.0;
     if !inp.q.ok {
         let msg = inp.q.error.as_ref().map(|e| i18n::error_text(e, inp.lang)).unwrap_or_default();
         y += f.lay(&msg, &err_style(), Some(CONTENT_W)).h;
-        y += 6.0 + f.lay(t.retry_hint, &hint_style(), Some(CONTENT_W)).h;
+        y += 6.0 + f.lay(&next_hint(inp), &hint_style(), Some(CONTENT_W)).h;
     } else if window(inp).is_none() {
         y += cap_style().lh;
     } else {
@@ -93,8 +113,15 @@ pub fn layout(f: &mut Fonts, inp: &PanelIn) -> PanelLayout {
             y += 9.0 + 1.0 + 8.0 + n as f32 * row_style().lh + (n as f32 - 1.0) * 4.0;
         }
     }
+    let mut foot = None;
+    if inp.q.stale() {
+        let (err, note) = foot_texts(inp);
+        y += 9.0;
+        foot = Some(y);
+        y += 1.0 + 8.0 + f.lay(&err, &foot_err_style(), Some(CONTENT_W)).h + 3.0 + f.lay(&note, &hint_style(), Some(CONTENT_W)).h;
+    }
     let h = y + 11.0 + 1.0;
-    PanelLayout { h, close: R::new(CONTENT_X + CONTENT_W - 20.0, 11.0, 20.0, 20.0) }
+    PanelLayout { h, close: R::new(CONTENT_X + CONTENT_W - 20.0, 11.0, 20.0, 20.0), foot }
 }
 
 pub fn draw(c: &mut Canvas, f: &mut Fonts, l: &PanelLayout, inp: &PanelIn, fx: &PanelFx) {
@@ -139,11 +166,19 @@ pub fn draw(c: &mut Canvas, f: &mut Fonts, l: &PanelLayout, inp: &PanelIn, fx: &
     let xw = f.width("×", &xs);
     f.draw(c, l.close.cx() - xw / 2.0, l.close.y, "×", &xs, None, 0.0);
 
+    if let Some(fy) = l.foot {
+        let (err, note) = foot_texts(inp);
+        c.fill_rr(R::new(CONTENT_X, fy, CONTENT_W, 1.0), 0.0, LINE);
+        let ey = fy + 1.0 + 8.0;
+        let lay = f.draw(c, CONTENT_X, ey, &err, &foot_err_style(), Some(CONTENT_W), 0.0);
+        f.draw(c, CONTENT_X, ey + lay.h + 3.0, &note, &hint_style(), Some(CONTENT_W), 0.0);
+    }
+
     let y = hy + 20.0 + 8.0;
     if !inp.q.ok {
         let msg = inp.q.error.as_ref().map(|e| i18n::error_text(e, inp.lang)).unwrap_or_default();
         let lay = f.draw(c, CONTENT_X, y, &msg, &err_style(), Some(CONTENT_W), 0.0);
-        f.draw(c, CONTENT_X, y + lay.h + 6.0, t.retry_hint, &hint_style(), Some(CONTENT_W), 0.0);
+        f.draw(c, CONTENT_X, y + lay.h + 6.0, &next_hint(inp), &hint_style(), Some(CONTENT_W), 0.0);
         return;
     }
     let Some(w) = window(inp) else {

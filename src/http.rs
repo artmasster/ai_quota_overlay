@@ -24,6 +24,8 @@ const USER_AGENT: &str = concat!("ai-quota-overlay/", env!("CARGO_PKG_VERSION"))
 pub struct Resp {
     pub status: u16,
     pub body: Vec<u8>,
+    /// When the server's `Retry-After` says to call again (unix ms), if it sent one.
+    pub retry_at: Option<i64>,
 }
 
 impl Resp {
@@ -124,8 +126,18 @@ fn head_agent() -> &'static Agent {
 
 fn read_resp(mut resp: ureq::http::Response<ureq::Body>) -> Result<Resp, HttpErr> {
     let status = resp.status().as_u16();
+    let retry_at = resp.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| retry_at(v, crate::model::now_ms()));
     let body = resp.body_mut().with_config().limit(READ_LIMIT).read_to_vec().map_err(map_err)?;
-    Ok(Resp { status, body })
+    Ok(Resp { status, body, retry_at })
+}
+
+/// `Retry-After` (whole seconds, or an HTTP date) → unix ms.
+fn retry_at(v: &str, now: i64) -> Option<i64> {
+    let v = v.trim();
+    if let Ok(s) = v.parse::<u64>() {
+        return Some(now.saturating_add(s.min(i64::MAX as u64 / 1000) as i64 * 1000));
+    }
+    chrono::DateTime::parse_from_rfc2822(v).ok().map(|d| d.timestamp_millis())
 }
 
 pub fn get(url: &str, headers: &[(&str, &str)]) -> Result<Resp, HttpErr> {
@@ -216,13 +228,22 @@ mod tests {
 
     #[test]
     fn resp_helpers() {
-        let r = Resp { status: 204, body: br#"{"a":1}"#.to_vec() };
+        let r = Resp { status: 204, body: br#"{"a":1}"#.to_vec(), retry_at: None };
         assert!(r.ok());
         assert_eq!(r.text(), r#"{"a":1}"#);
         let v: serde_json::Value = r.json().unwrap();
         assert_eq!(v["a"], 1);
-        assert!(!Resp { status: 301, body: vec![] }.ok());
-        assert!(!Resp { status: 199, body: vec![] }.ok());
+        assert!(!Resp { status: 301, body: vec![], retry_at: None }.ok());
+        assert!(!Resp { status: 199, body: vec![], retry_at: None }.ok());
+    }
+
+    #[test]
+    fn retry_after_forms() {
+        assert_eq!(retry_at("120", 1_000), Some(121_000));
+        assert_eq!(retry_at(" 0 ", 5), Some(5));
+        assert_eq!(retry_at("Wed, 21 Oct 2015 07:28:00 GMT", 0), Some(1_445_412_480_000));
+        assert_eq!(retry_at("soon", 0), None);
+        assert_eq!(retry_at("-5", 0), None);
     }
 
     #[test]
@@ -249,7 +270,7 @@ mod tests {
 
 /// Dev aid: QUOTA_OVERLAY_LOG_REQUESTS=<file> appends "<unix ms> <method> <url without query>" per request
 /// (never headers or bodies), to check the polling rhythm.
-fn log_request(method: &str, url: &str) {
+pub(crate) fn log_request(method: &str, url: &str) {
     static PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
     let Some(path) = PATH.get_or_init(|| std::env::var_os("QUOTA_OVERLAY_LOG_REQUESTS").map(Into::into)) else { return };
     let bare = url.split('?').next().unwrap_or(url);
