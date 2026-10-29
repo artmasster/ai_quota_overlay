@@ -1,8 +1,8 @@
 [package]
 name = "ai-quota-overlay"
-version = "2.0.4"
+version = "2.1.0"
 edition = "2021"
-description = "Tiny always-on-top rings showing how much Claude, Codex and Cursor quota you have left"
+description = "Tiny always-on-top rings showing how much Claude, Codex, Cursor and Copilot quota you have left"
 license = "MIT"
 repository = "https://github.com/artmasster/ai_quota_overlay"
 publish = false
@@ -19,6 +19,7 @@ cosmic-text = { version = "0.14", default-features = false, features = ["std", "
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 base64 = "0.22"
 sha2 = "0.10"
+getrandom = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 ureq = { version = "3", default-features = false, features = ["native-tls", "gzip"] }
@@ -31,6 +32,8 @@ windows = { version = "0.62", features = [
     "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
     "Win32_Security",
     "Win32_UI_Controls",
     "Win32_UI_HiDpi",
@@ -68,8 +71,19 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
+[profile.dev]
+# Test builds run on this machine like the real thing: unoptimised, per-pixel loops (presenting the app window)
+# made dragging stutter.
+opt-level = 2
+
 [profile.dev.package."*"]
 opt-level = 2
+
+# tiny-skia's anti-aliased rect fill debug-asserts on a rect that covers two partial pixels and no whole one (a 1 px
+# divider at some offsets): nothing is wrong there, and release builds compile the assert out, but it took debug
+# builds down.
+[profile.dev.package.tiny-skia]
+debug-assertions = false
 
 # The software renderer is the hot path (every repaint of the app window): size-optimised it ran about twice as
 # slow, for no real saving in size.

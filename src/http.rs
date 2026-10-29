@@ -162,6 +162,17 @@ pub fn post_json(url: &str, headers: &[(&str, &str)], body: &serde_json::Value) 
     read_resp(req.send(&bytes[..]).map_err(map_err)?)
 }
 
+/// POSTs `fields` as `application/x-www-form-urlencoded`.
+pub fn post_form(url: &str, headers: &[(&str, &str)], fields: &[(&str, &str)]) -> Result<Resp, HttpErr> {
+    log_request("POST", url);
+    let body = crate::quota::query(fields);
+    let mut req = agent().post(url).header("Content-Type", "application/x-www-form-urlencoded");
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    read_resp(req.send(body.as_bytes()).map_err(map_err)?)
+}
+
 /// True when any HTTP status comes back within `timeout`; false only when the request itself failed.
 pub fn head_ok(url: &str, timeout: Duration) -> bool {
     log_request("HEAD", url);

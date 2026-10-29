@@ -262,6 +262,26 @@ impl Host for UnixHost {
         let _ = std::process::Command::new(opener).arg(url).spawn();
     }
 
+    fn copy_text(&mut self, text: &str) {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        // pbcopy on macOS; on Linux whichever of Wayland's and X11's tools is there.
+        let tools: &[(&str, &[&str])] =
+            if cfg!(target_os = "macos") { &[("pbcopy", &[])] } else { &[("wl-copy", &[]), ("xclip", &["-selection", "clipboard"]), ("xsel", &["-ib"])] };
+        for (cmd, args) in tools {
+            if let Ok(mut child) = Command::new(cmd).args(*args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(text.as_bytes());
+                }
+                // Reaped on another thread: xclip keeps running while it owns the selection.
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                return;
+            }
+        }
+    }
+
     fn quit(&mut self) {
         self.quit = true;
     }

@@ -1,19 +1,23 @@
-//! The compact card (`.card` in src/index.html): one column of rings per service, the optional internet light
-//! and the "⋯" button, laid out like the page's flexbox, horizontal or vertical.
+//! The compact card (`.card` in src/index.html): one column of rings per account, the optional internet light
+//! and the "⋯" button, laid out like the page's flexbox, horizontal or vertical. A service with more than one
+//! account on the card puts each account's name (an email's part before the @) on a line under the service's.
 use super::gfx::{Canvas, Filter, Rgba, R};
 use super::text::{Fonts, Style};
 use super::{icons, js_round, left_label, level_color, svc_color, BAD, LINE, MUTED, OK, TEXT, TRACK, WARN};
 use crate::i18n::{self, Lang};
-use crate::model::{NetState, Snapshot, Svc, SERVICES};
+use crate::model::{short_who, Aid, NetState, Snapshot, Svc};
+use crate::settings::Settings;
 use std::collections::HashMap;
 
 /// What a point on the card is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Target {
-    /// A ring: service and window index (-1 = the error / no-data ring).
-    Ring(Svc, i32),
+    /// A ring: account and window index (-1 = the error / no-data ring).
+    Ring(Aid, i32),
     More,
     Net,
+    /// The "add account" / "pick accounts" ring shown when nothing else is (opens the app window).
+    Prompt,
     /// Anywhere else on the card.
     Card,
 }
@@ -22,21 +26,20 @@ pub struct CardIn<'a> {
     pub lang: Lang,
     pub vertical: bool,
     pub network_on: bool,
-    pub services_on: [bool; 3],
-    pub hidden: [&'a [String]; 3],
+    /// Which accounts are on and which of their windows are left off.
+    pub settings: &'a Settings,
     pub data: Option<&'a Snapshot>,
     pub net: Option<NetState>,
-    pub selected: Option<(Svc, i32)>,
+    pub selected: Option<(Aid, i32)>,
     pub now: i64,
 }
 
-/// Animation inputs: hover amounts (0..1, eased by the caller), loading, offline alarm phase in seconds.
+/// Animation inputs: hover amounts (0..1, eased by the caller), offline alarm phase in seconds.
 #[derive(Default)]
 pub struct CardFx {
     pub hover: HashMap<Target, f32>,
     /// `.card:hover` (border and the "⋯" opacity).
     pub card_hover: f32,
-    pub loading: bool,
     pub alarm_s: f32,
 }
 
@@ -62,6 +65,10 @@ fn ring_text_style() -> Style {
 fn empty_style() -> Style {
     Style::new(11.0, 400, MUTED, 1.3)
 }
+/// The account line under a service name.
+fn who_style() -> Style {
+    Style::new(9.5, 400, MUTED, 1.3)
+}
 
 struct RingBox {
     target: Target,
@@ -73,10 +80,16 @@ struct RingBox {
 }
 
 enum Item {
-    Net { r: R, online: bool, name_w: f32, lbl: String },
-    /// stale: old numbers shown because the latest check failed (a small amber dot after the name).
-    Svc { r: R, svc: Svc, name_w: f32, rings: Vec<RingBox>, divider: bool, stale: bool },
+    /// gap: room under the name (the account line of the columns beside it).
+    Net { r: R, online: bool, name_w: f32, lbl: String, gap: f32 },
+    /// stale: old numbers shown because the latest check failed (a small amber dot after the name). who: which of
+    /// the service's accounts it is (a line under the name), when it has more than one here.
+    Svc { r: R, svc: Svc, who: Option<String>, name_w: f32, rings: Vec<RingBox>, divider: bool, stale: bool },
+    /// The first check isn't back yet ("…").
     Empty { r: R, text: String, after_net: bool },
+    /// Nothing to show: an empty ring with a "+" in place of the accounts, laid out like one (`tip` is the
+    /// tooltip saying why; `top`: room above the ring).
+    Prompt { r: R, label: String, tip: &'static str, divider: bool, top: f32 },
     More { r: R },
 }
 
@@ -104,6 +117,7 @@ impl CardLayout {
                 }
                 Item::More { r } if r.contains(x, y) => return Some(Target::More),
                 Item::Net { r, .. } if r.contains(x, y) => return Some(Target::Net),
+                Item::Prompt { r, .. } if r.contains(x, y) => return Some(Target::Prompt),
                 _ => {}
             }
         }
@@ -127,6 +141,10 @@ impl CardLayout {
         match t {
             Target::More => Some(s.more),
             Target::Net => Some(if net.is_some_and(|n| n.online) { s.online } else { s.offline_title }),
+            Target::Prompt => self.items.iter().find_map(|it| match it {
+                Item::Prompt { tip, .. } => Some(*tip),
+                _ => None,
+            }),
             _ => None,
         }
     }
@@ -139,7 +157,8 @@ pub fn layout(f: &mut Fonts, inp: &CardIn) -> CardLayout {
     // Each item measured as (width, height) of its margin box, built at the origin and moved into place below.
     let mut items: Vec<Item> = Vec::new();
 
-    let net_item = |f: &mut Fonts| -> Option<Item> {
+    // `gap`: room under the name, to keep the light level with rings that have an account line above them.
+    let net_item = |f: &mut Fonts, gap: f32| -> Option<Item> {
         let n = inp.net?;
         if !inp.network_on {
             return None;
@@ -155,29 +174,28 @@ pub fn layout(f: &mut Fonts, inp: &CardIn) -> CardLayout {
         let lbl_w = f.width(&lbl, &ls);
         let light_w = RING.max(lbl_w) + 4.0;
         let w = name_w.max(light_w);
-        let h = ns.lh + 2.0 + 2.0 + RING + 1.0 + ls.lh + 1.0;
-        Some(Item::Net { r: R::new(0.0, 0.0, w, h), online: n.online, name_w, lbl })
+        let h = ns.lh + gap + 2.0 + 2.0 + RING + 1.0 + ls.lh + 1.0;
+        Some(Item::Net { r: R::new(0.0, 0.0, w, h), online: n.online, name_w, lbl, gap })
     };
 
     let more_item = || Item::More { r: R::default() };
 
     match inp.data {
         None => {
-            if let Some(n) = net_item(f) {
+            if let Some(n) = net_item(f, 0.0) {
                 items.push(n);
             }
             items.push(empty_item(f, "…", v, matches!(items.last(), Some(Item::Net { .. }))));
             items.push(more_item());
         }
         Some(data) => {
-            // A service shows when it's switched on, logged in, and has at least one window left on (or an error).
+            // An account shows when it's switched on, logged in, and has at least one window left on (or an error).
             let mut shown = Vec::new();
-            for s in SERVICES {
-                let Some(r) = data.get(s) else { continue };
-                if !inp.services_on[s.index()] || r.absent {
+            for (a, r) in &data.accts {
+                if !inp.settings.on(&a.id) || r.absent {
                     continue;
                 }
-                let hidden = inp.hidden[s.index()];
+                let hidden = inp.settings.hidden_of(&a.id);
                 let wins: Vec<(usize, &crate::model::Win)> = if r.ok {
                     r.windows.iter().enumerate().filter(|(_, w)| !hidden.contains(&w.id)).collect()
                 } else {
@@ -186,31 +204,49 @@ pub fn layout(f: &mut Fonts, inp: &CardIn) -> CardLayout {
                 if r.ok && !r.windows.is_empty() && wins.is_empty() {
                     continue;
                 }
-                shown.push((s, r, wins));
+                shown.push((a, r, wins));
             }
-            if let Some(n) = net_item(f) {
+            // Which of a service's accounts a column is, when the card shows more than one: the email's name part on
+            // a line of its own under the service name (fitted to the column, never widening it).
+            let whos: Vec<Option<String>> = shown
+                .iter()
+                .map(|(a, _, _)| {
+                    let same: Vec<_> = shown.iter().filter(|(b, _, _)| b.svc == a.svc).collect();
+                    (same.len() > 1).then(|| {
+                        let n = same.iter().position(|(b, _, _)| b.id == a.id).unwrap_or(0) + 1;
+                        if a.who.is_empty() { format!("#{n}") } else { short_who(&a.who).to_string() }
+                    })
+                })
+                .collect();
+            // Side by side, every column keeps that line (empty where it has none) so the rings stay level.
+            let who_row = if !v && whos.iter().any(Option::is_some) { who_style().lh } else { 0.0 };
+            if let Some(n) = net_item(f, who_row) {
                 items.push(n);
             }
             if shown.is_empty() {
-                let any_on = SERVICES.iter().any(|s| inp.services_on[s.index()] && data.get(*s).is_some_and(|r| !r.absent));
-                let all_off = SERVICES.iter().all(|s| !inp.services_on[s.index()]);
-                let text = if any_on || all_off { t.all_off } else { t.not_logged_in };
-                let after_net = matches!(items.last(), Some(Item::Net { .. }));
-                items.push(empty_item(f, text, v, after_net));
+                // An account on with all its windows left off, or one switched off: pick what to show; else nothing
+                // logged in: add an account.
+                let any_on = data.accts.iter().any(|(a, r)| inp.settings.on(&a.id) && !r.absent);
+                let some_off = data.accts.iter().any(|(a, _)| !inp.settings.on(&a.id));
+                let (label, tip) = if any_on || some_off { (t.pick_accounts, t.all_off) } else { (t.add_account, t.not_logged_in) };
+                let divider = matches!(items.last(), Some(Item::Net { .. }));
+                items.push(prompt_item(f, label, tip, v, divider));
             } else {
                 // `.svc + .svc` counts the internet column too (it is a `.svc`).
                 let mut first = !matches!(items.last(), Some(Item::Net { .. }));
-                for (s, r, wins) in shown {
+                for ((a, r, wins), who) in shown.into_iter().zip(whos) {
+                    let s = a.svc;
+                    let x = a.aid();
                     let stale = r.stale();
                     let mut rings = Vec::new();
                     if !r.ok {
-                        rings.push((Target::Ring(s, -1), 0.0, "!".to_string(), t.error.to_string()));
+                        rings.push((Target::Ring(x, -1), 0.0, "!".to_string(), t.error.to_string()));
                     } else if wins.is_empty() {
-                        rings.push((Target::Ring(s, -1), 0.0, "–".to_string(), t.no_data.to_string()));
+                        rings.push((Target::Ring(x, -1), 0.0, "–".to_string(), t.no_data.to_string()));
                     } else {
                         for (i, w) in wins {
                             let left = 100.0 - w.used();
-                            rings.push((Target::Ring(s, i as i32), left, js_round(left).to_string(), left_label(w, inp.lang, inp.now)));
+                            rings.push((Target::Ring(x, i as i32), left, js_round(left).to_string(), left_label(w, inp.lang, inp.now)));
                         }
                     }
                     let ns = name_style(svc_color(s));
@@ -228,12 +264,14 @@ pub fn layout(f: &mut Fonts, inp: &CardIn) -> CardLayout {
                     let rings_w = if v { boxes.iter().map(|b| b.r.w).fold(0.0, f32::max) } else { pos - 6.0 };
                     let rings_h = if v { pos - 3.0 } else { ring_h };
                     let w = name_w.max(rings_w);
-                    let h = ns.lh + 2.0 + rings_h;
+                    let who = who.map(|t| f.ellipsize(&t, &who_style(), w));
+                    let who_h = if who.is_some() { who_style().lh } else { who_row };
+                    let h = ns.lh + who_h + 2.0 + rings_h;
                     // Rings are centred under the name (align-items: center), relative to the column.
                     let off_x = (w - rings_w) / 2.0;
                     for b in &mut boxes {
                         b.r.x += off_x + if v { (rings_w - b.r.w) / 2.0 } else { 0.0 };
-                        b.r.y += ns.lh + 2.0;
+                        b.r.y += ns.lh + who_h + 2.0;
                     }
                     let divider = !first;
                     first = false;
@@ -253,7 +291,7 @@ pub fn layout(f: &mut Fonts, inp: &CardIn) -> CardLayout {
                             }
                         }
                     }
-                    items.push(Item::Svc { r, svc: s, name_w, rings: boxes, divider, stale });
+                    items.push(Item::Svc { r, svc: s, who, name_w, rings: boxes, divider, stale });
                 }
             }
             items.push(more_item());
@@ -281,7 +319,7 @@ pub fn layout(f: &mut Fonts, inp: &CardIn) -> CardLayout {
     let cross = |r: &R| if v { r.w } else { r.h };
     let item_r = |it: &Item| -> R {
         match it {
-            Item::Net { r, .. } | Item::Svc { r, .. } | Item::Empty { r, .. } | Item::More { r } => *r,
+            Item::Net { r, .. } | Item::Svc { r, .. } | Item::Empty { r, .. } | Item::Prompt { r, .. } | Item::More { r } => *r,
         }
     };
     // The "⋯" box: 14 px wide (horizontal) or 12 px tall (vertical), stretched across.
@@ -327,7 +365,7 @@ pub fn layout(f: &mut Fonts, inp: &CardIn) -> CardLayout {
                 *r = R::new(ox, oy, nw, nh);
                 let _ = divider;
             }
-            Item::Net { r, .. } => {
+            Item::Net { r, .. } | Item::Prompt { r, .. } => {
                 let old = *r;
                 *r = if v { R::new(ox, oy, cross_max, old.h) } else { R::new(ox, oy, old.w, cross_max) };
             }
@@ -350,6 +388,21 @@ pub fn layout(f: &mut Fonts, inp: &CardIn) -> CardLayout {
     CardLayout { w, h, items, vertical: v }
 }
 
+/// The ring-sized "add account" / "pick accounts" column: the ring and its label. After the internet column it
+/// gets the divider a second service would, and beside it (horizontal) a name-high gap so the rings line up.
+fn prompt_item(f: &mut Fonts, label: &str, tip: &'static str, vertical: bool, divider: bool) -> Item {
+    let ls = lbl_style();
+    let top = if divider && !vertical { name_style(MUTED).lh + 2.0 } else { 0.0 };
+    let w = RING.max(f.width(label, &ls)) + 4.0;
+    let h = top + 2.0 + RING + 1.0 + ls.lh + 1.0;
+    let r = match (divider, vertical) {
+        (false, _) => R::new(0.0, 0.0, w, h),
+        (true, false) => R::new(0.0, 0.0, w + 11.0, h),
+        (true, true) => R::new(0.0, 0.0, w, h + 7.0),
+    };
+    Item::Prompt { r, label: label.to_string(), tip, divider, top }
+}
+
 fn empty_item(f: &mut Fonts, text: &str, vertical: bool, after_net: bool) -> Item {
     let st = empty_style();
     let (w, h) = if vertical {
@@ -368,20 +421,16 @@ pub fn draw(c: &mut Canvas, f: &mut Fonts, l: &CardLayout, inp: &CardIn, fx: &Ca
     let card = R::new(0.0, 0.0, l.w, l.h);
     let offline = inp.network_on && inp.net.is_some_and(|n| !n.online);
     c.fill_rr(card.inset(0.5, 0.5, 0.5, 0.5), 11.5, Rgba::rgba(17, 19, 24, 0.86));
-    let border = if offline {
-        BAD
-    } else if fx.loading {
-        Rgba::rgba(255, 255, 255, 0.3)
-    } else {
-        LINE.lerp(Rgba::rgba(255, 255, 255, 0.2), fx.card_hover)
-    };
+    // Only the pointer lights the border up: a check under way changes nothing here (it used to whiten it, which
+    // looked like a hover coming and going by itself once a minute).
+    let border = if offline { BAD } else { LINE.lerp(Rgba::rgba(255, 255, 255, 0.2), fx.card_hover) };
     c.border(card, 12.0, 1.0, border);
     let lang = inp.lang;
     let t = i18n::t(lang);
 
     for it in &l.items {
         match it {
-            Item::Net { r, online, name_w, lbl } => {
+            Item::Net { r, online, name_w, lbl, gap } => {
                 let mut ns = name_style(if *online { OK } else { BAD });
                 let mut ls = lbl_style();
                 if !*online {
@@ -390,7 +439,7 @@ pub fn draw(c: &mut Canvas, f: &mut Fonts, l: &CardLayout, inp: &CardIn, fx: &Ca
                 }
                 f.draw(c, r.cx() - name_w / 2.0, r.y, t.net, &ns, None, 0.0);
                 let dot_cx = r.cx();
-                let dot_cy = r.y + ns.lh + 2.0 + 2.0 + RING / 2.0;
+                let dot_cy = r.y + ns.lh + gap + 2.0 + 2.0 + RING / 2.0;
                 let rad = RING / 2.0;
                 if *online {
                     c.glow_circle(dot_cx, dot_cy, rad, 0.0, 10.0, 0.0, OK.pct(0.55));
@@ -412,7 +461,7 @@ pub fn draw(c: &mut Canvas, f: &mut Fonts, l: &CardLayout, inp: &CardIn, fx: &Ca
                 let lw = f.width(lbl, &ls);
                 f.draw(c, r.cx() - lw / 2.0, dot_cy + rad + 1.0, lbl, &ls, None, 0.0);
             }
-            Item::Svc { r, svc, name_w, rings, divider, stale } => {
+            Item::Svc { r, svc, who, name_w, rings, divider, stale } => {
                 if *divider {
                     if l.vertical {
                         c.fill_rr(R::new(r.x, r.y, r.w, 1.0), 0.0, LINE);
@@ -421,20 +470,53 @@ pub fn draw(c: &mut Canvas, f: &mut Fonts, l: &CardLayout, inp: &CardIn, fx: &Ca
                     }
                 }
                 let ns = name_style(svc_color(*svc));
-                let (nx, ny) = if l.vertical {
-                    (r.cx() - name_w / 2.0, r.y + if *divider { 7.0 } else { 0.0 })
+                // The column's middle, and the name's top.
+                let (mid, ny) = if l.vertical {
+                    (r.cx(), r.y + if *divider { 7.0 } else { 0.0 })
                 } else {
                     let inner_x = r.x + if *divider { 11.0 } else { 0.0 };
                     let inner_w = r.w - if *divider { 11.0 } else { 0.0 };
-                    (inner_x + (inner_w - name_w) / 2.0, r.y)
+                    (inner_x + inner_w / 2.0, r.y)
                 };
+                let nx = mid - name_w / 2.0;
                 f.draw(c, nx, ny, svc.name(), &ns, None, 0.0);
+                if let Some(t) = who {
+                    let ws = who_style();
+                    let ww = f.width(t, &ws);
+                    f.draw(c, mid - ww / 2.0, ny + ns.lh, t, &ws, None, 0.0);
+                }
                 if *stale {
                     c.fill_circle(nx + name_w + 3.5, ny + ns.lh / 2.0, 2.0, WARN);
                 }
                 for rb in rings {
                     draw_ring(c, f, rb, inp, fx);
                 }
+            }
+            Item::Prompt { r, label, divider, top, .. } => {
+                // The divider and the content box after it, as for a second service.
+                let inner = if !*divider {
+                    *r
+                } else if l.vertical {
+                    c.fill_rr(R::new(r.x, r.y, r.w, 1.0), 0.0, LINE);
+                    r.inset(7.0, 0.0, 0.0, 0.0)
+                } else {
+                    c.fill_rr(R::new(r.x, r.y, 1.0, r.h), 0.0, LINE);
+                    r.inset(0.0, 0.0, 0.0, 11.0)
+                };
+                let hov = fx.amt(Target::Prompt);
+                let ls = lbl_style();
+                let bw = RING.max(f.width(label, &ls)) + 4.0;
+                let b = R::new(inner.cx() - bw / 2.0, inner.y + top, bw, 2.0 + RING + 1.0 + ls.lh + 1.0);
+                if hov > 0.0 {
+                    c.fill_rr(b, 9.0, Rgba::rgba(255, 255, 255, 0.07 * hov));
+                }
+                let (cx, cy) = (b.cx(), b.y + 2.0 + RING / 2.0);
+                c.ring(cx, cy, RING / 2.0 - 2.0 - 1.0, 4.0, TRACK, 0.0, Rgba::TRANSPARENT);
+                let col = MUTED.lerp(TEXT, hov);
+                c.fill_rr(R::new(cx - 6.0, cy - 1.0, 12.0, 2.0), 1.0, col);
+                c.fill_rr(R::new(cx - 1.0, cy - 6.0, 2.0, 12.0), 1.0, col);
+                let lw = f.width(label, &ls);
+                f.draw(c, cx - lw / 2.0, b.y + 2.0 + RING + 1.0, label, &ls.color(col), None, 0.0);
             }
             Item::Empty { r, text, after_net } => {
                 let st = empty_style();

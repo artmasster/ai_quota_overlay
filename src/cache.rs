@@ -1,8 +1,12 @@
-//! quota.json next to settings.json: each service's last good numbers and when they were fetched, so a check that
+//! quota.json next to settings.json: each account's last good numbers and when they were fetched, so a check that
 //! fails right after a restart ("too many requests", offline) still has numbers to show. Usage only, no logins.
-use crate::model::{Extra, Quota, Win, SERVICES};
+//! Keyed by account id; older versions' entries under a bare service key (other apps' logins) are dropped.
+use crate::model::{Extra, Quota, Svc, Win};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+
+pub type Good = BTreeMap<String, Quota>;
 
 #[derive(Serialize, Deserialize)]
 struct CWin {
@@ -89,26 +93,25 @@ fn from_c(c: CQuota) -> Quota {
     }
 }
 
-pub fn parse(text: &str) -> [Option<Quota>; 3] {
-    let mut m: serde_json::Map<String, serde_json::Value> = serde_json::from_str(text).unwrap_or_default();
-    SERVICES.map(|s| m.remove(s.key()).and_then(|v| serde_json::from_value::<CQuota>(v).ok()).map(from_c))
+pub fn parse(text: &str) -> Good {
+    let m: serde_json::Map<String, serde_json::Value> = serde_json::from_str(text).unwrap_or_default();
+    m.into_iter()
+        .filter(|(id, _)| Svc::from_key(id).is_none())
+        .filter_map(|(id, v)| Some((id, from_c(serde_json::from_value::<CQuota>(v).ok()?))))
+        .collect()
 }
 
-pub fn to_json(good: &[Option<Quota>; 3]) -> String {
-    let mut m = serde_json::Map::new();
-    for s in SERVICES {
-        if let Some(c) = good[s.index()].as_ref().and_then(to_c) {
-            m.insert(s.key().into(), serde_json::to_value(c).unwrap_or_default());
-        }
-    }
+pub fn to_json(good: &Good) -> String {
+    let m: serde_json::Map<String, serde_json::Value> =
+        good.iter().filter_map(|(id, q)| Some((id.clone(), serde_json::to_value(to_c(q)?).unwrap_or_default()))).collect();
     serde_json::Value::Object(m).to_string()
 }
 
-pub fn load() -> [Option<Quota>; 3] {
+pub fn load() -> Good {
     parse(&std::fs::read_to_string(file()).unwrap_or_default())
 }
 
-pub fn save(good: &[Option<Quota>; 3]) {
+pub fn save(good: &Good) {
     let path = file();
     let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
     let _ = std::fs::write(&path, to_json(good));
@@ -154,15 +157,20 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let all = [Some(good()), None, Some(Quota { ok: true, as_of: Some(7), credits: Some(3.5), ..Quota::default() })];
+        let all: Good = [
+            ("claude-0a0b0c".to_string(), good()),
+            ("cursor-77aa00".to_string(), Quota { ok: true, as_of: Some(7), credits: Some(3.5), ..Quota::default() }),
+            ("claude-1a2b3c".to_string(), Quota { plan: "pro".into(), ..good() }),
+        ]
+        .into();
         let back = parse(&to_json(&all));
-        assert_eq!(back[0], all[0]);
-        assert_eq!(back[1], None);
-        assert_eq!(back[2].as_ref().unwrap().credits, Some(3.5));
+        assert_eq!(back, all);
         // Without a fetch time there is nothing to store.
-        assert_eq!(parse(&to_json(&[Some(Quota { ok: true, ..Quota::default() }), None, None]))[0], None);
-        assert_eq!(parse("not json"), [None, None, None]);
-        assert_eq!(parse(r#"{"claude":{"plan":"x"}}"#)[0], None);
+        assert!(parse(&to_json(&[("claude-0a0b0c".to_string(), Quota { ok: true, ..Quota::default() })].into())).is_empty());
+        assert!(parse("not json").is_empty());
+        assert!(parse(r#"{"claude-0a0b0c":{"plan":"x"}}"#).is_empty());
+        // An older version's entry for another app's login.
+        assert!(parse(r#"{"claude":{"at":5,"plan":"max"}}"#).is_empty());
     }
 
     #[test]

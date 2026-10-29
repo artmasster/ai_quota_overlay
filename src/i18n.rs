@@ -36,6 +36,9 @@ pub struct S {
     pub error: &'static str,
     pub not_logged_in: &'static str,
     pub all_off: &'static str,
+    /// Under the empty ring on a card with nothing to show (`not_logged_in` / `all_off` are its tooltips).
+    pub add_account: &'static str,
+    pub pick_accounts: &'static str,
     pub more: &'static str,
     pub billing: &'static str,
     pub billing_short: &'static str,
@@ -92,6 +95,7 @@ pub struct Set {
     pub opacity: &'static str,
     pub startup: &'static str,
     pub startup_hint: &'static str,
+    pub startup_blocked: &'static str,
     pub network_show: &'static str,
     pub network_hint: &'static str,
     pub services: &'static str,
@@ -99,13 +103,28 @@ pub struct Set {
     pub connected: &'static str,
     pub absent: &'static str,
     pub failed: &'static str,
+    /// Old numbers kept while the server asks to wait ("too many requests").
+    pub waiting: &'static str,
     pub disabled: &'static str,
     pub checking: &'static str,
     pub windows_pending: &'static str,
     pub windows_off: &'static str,
-    pub login_claude: &'static str,
-    pub login_codex: &'static str,
-    pub login_cursor: &'static str,
+    /// In place of the accounts while there are none.
+    pub no_accounts: &'static str,
+    pub no_accounts_hint: &'static str,
+    pub sign_in: &'static str,
+    pub sign_out: &'static str,
+    /// The sign-out button after one click: a second click signs out.
+    pub sure: &'static str,
+    pub cancel: &'static str,
+    pub copy_link: &'static str,
+    pub copy_code: &'static str,
+    pub copied: &'static str,
+    /// GitHub's device sign-in: before the code comes, and under it.
+    pub getting_code: &'static str,
+    pub code_hint: &'static str,
+    /// Under the "finish in your browser" line.
+    pub other_account: &'static str,
     pub refresh: &'static str,
     pub snap: &'static str,
     pub restart: &'static str,
@@ -120,8 +139,10 @@ pub static EN: S = S {
     offline_title: "No internet connection",
     no_data: "no data",
     error: "error",
-    not_logged_in: "Not logged in to Claude, Codex or Cursor",
-    all_off: "Nothing to show — pick services in Settings",
+    not_logged_in: "Not logged in — click to sign in",
+    all_off: "Nothing to show — click to pick accounts",
+    add_account: "Sign in",
+    pick_accounts: "Pick",
     more: "Settings",
     billing: "Billing cycle",
     billing_short: "Bill",
@@ -167,20 +188,31 @@ pub static EN: S = S {
         opacity: "Opacity",
         startup: "Launch at startup",
         startup_hint: "Open the overlay when you sign in",
+        startup_blocked: "Couldn't change it: Windows or an antivirus kept the startup setting as it was",
         network_show: "Show internet status",
         network_hint: "Pings every 3 seconds and shows the latency on the card",
         services: "Services",
-        services_hint: "Pick which services and which quota windows show on the card",
+        services_hint: "Sign in to as many accounts as you like, then pick which quota windows show on the card",
         connected: "Connected",
         absent: "Not logged in",
         failed: "Error",
+        waiting: "Waiting to check again",
         disabled: "Off",
         checking: "Checking…",
         windows_pending: "Quota windows show up here after the first check",
         windows_off: "Turn on to check this service",
-        login_claude: "Run claude in a terminal, then /login",
-        login_codex: "Sign in to Codex with your ChatGPT account",
-        login_cursor: "Sign in to the Cursor app",
+        no_accounts: "No accounts yet",
+        no_accounts_hint: "Sign in with a button above — it opens in your browser. A service can have more than one account.",
+        sign_in: "Sign in",
+        sign_out: "Sign out",
+        sure: "Sign out?",
+        cancel: "Cancel",
+        copy_link: "Copy link",
+        copy_code: "Copy code",
+        copied: "Copied",
+        getting_code: "Getting a sign-in code from GitHub…",
+        code_hint: "It's on your clipboard already: paste it on the GitHub page and authorize.",
+        other_account: "Signed in there with another account? Sign out of it first, or open the link in a private window.",
         refresh: "Refresh now",
         snap: "Snap to corner",
         restart: "Restart",
@@ -196,8 +228,10 @@ pub static TH: S = S {
     offline_title: "เชื่อมต่ออินเทอร์เน็ตไม่ได้",
     no_data: "ไม่มีข้อมูล",
     error: "ผิดพลาด",
-    not_logged_in: "ยังไม่ได้ login Claude, Codex หรือ Cursor",
-    all_off: "ไม่มีอะไรให้แสดง — เลือกบริการในหน้าตั้งค่า",
+    not_logged_in: "ยังไม่ได้ login — คลิกเพื่อ login",
+    all_off: "ไม่มีอะไรให้แสดง — คลิกเพื่อเลือกบัญชี",
+    add_account: "login",
+    pick_accounts: "เลือก",
     more: "ตั้งค่า",
     billing: "รอบบิล",
     billing_short: "บิล",
@@ -243,20 +277,31 @@ pub static TH: S = S {
         opacity: "ความทึบ",
         startup: "เปิดพร้อมเครื่อง",
         startup_hint: "เปิด overlay เองตอนเข้าเครื่อง",
+        startup_blocked: "เปลี่ยนไม่ได้: Windows หรือโปรแกรมแอนตี้ไวรัสไม่ยอมให้แก้การเปิดพร้อมเครื่อง",
         network_show: "แสดงสถานะอินเทอร์เน็ต",
         network_hint: "เช็คทุก 3 วินาที และแสดงค่า ping บนกล่อง",
         services: "บริการ",
-        services_hint: "เลือกว่าจะให้บริการไหน และรอบโควต้าไหนขึ้นบนกล่อง",
+        services_hint: "login ได้หลายบัญชี แล้วเลือกว่ารอบโควต้าไหนจะขึ้นบนกล่อง",
         connected: "เชื่อมต่อแล้ว",
         absent: "ยังไม่ได้ login",
         failed: "ผิดพลาด",
+        waiting: "รอเช็คใหม่",
         disabled: "ปิดอยู่",
         checking: "กำลังเช็ค…",
         windows_pending: "รอบโควต้าจะขึ้นตรงนี้หลังเช็คครั้งแรก",
         windows_off: "เปิดเพื่อเช็คบริการนี้",
-        login_claude: "เปิด terminal พิมพ์ claude แล้ว /login",
-        login_codex: "login Codex ด้วยบัญชี ChatGPT",
-        login_cursor: "login แอป Cursor",
+        no_accounts: "ยังไม่มีบัญชี",
+        no_accounts_hint: "กดปุ่มด้านบนเพื่อ login ผ่านเบราว์เซอร์ บริการเดียวเพิ่มได้หลายบัญชี",
+        sign_in: "login",
+        sign_out: "ออกจากระบบ",
+        sure: "ยืนยันออก?",
+        cancel: "ยกเลิก",
+        copy_link: "คัดลอกลิงก์",
+        copy_code: "คัดลอกโค้ด",
+        copied: "คัดลอกแล้ว",
+        getting_code: "กำลังขอโค้ด login จาก GitHub…",
+        code_hint: "คัดลอกโค้ดไว้ให้แล้ว วางในหน้า GitHub แล้วกดอนุญาต",
+        other_account: "ถ้าเบราว์เซอร์ login บัญชีอื่นค้างอยู่ ให้ออกจากระบบก่อน หรือเปิดลิงก์ในหน้าต่างส่วนตัว",
         refresh: "รีเฟรชตอนนี้",
         snap: "กลับไปมุมจอ",
         restart: "รีสตาร์ท",
@@ -391,6 +436,63 @@ pub fn retry_at(l: Lang, time: &str, manual: bool) -> String {
         (Lang::Th, false) => format!("เซิร์ฟเวอร์ขอให้รอ · จะลองใหม่เองตอน {time}"),
     }
 }
+// ---------- signing in ----------
+
+pub fn enter_code(l: Lang, code: &str) -> String {
+    match l {
+        Lang::En => format!("Enter {code} on the GitHub page"),
+        Lang::Th => format!("ใส่โค้ด {code} ในหน้า GitHub"),
+    }
+}
+pub fn waiting(l: Lang, svc: &str) -> String {
+    match l {
+        Lang::En => format!("Finish signing in to {svc} in your browser…"),
+        Lang::Th => format!("login {svc} ให้เสร็จในเบราว์เซอร์…"),
+    }
+}
+pub fn login_failed(l: Lang, msg: &str) -> String {
+    match l {
+        Lang::En => format!("Couldn't sign in — {msg}"),
+        Lang::Th => format!("login ไม่สำเร็จ — {msg}"),
+    }
+}
+pub fn signed_in(l: Lang, svc: &str, who: &str) -> String {
+    match (l, who.is_empty()) {
+        (Lang::En, false) => format!("Signed in to {svc} as {who}"),
+        (Lang::En, true) => format!("Signed in to {svc}"),
+        (Lang::Th, false) => format!("login {svc} แล้ว: {who}"),
+        (Lang::Th, true) => format!("login {svc} แล้ว"),
+    }
+}
+pub fn login_timeout(l: Lang) -> &'static str {
+    match l {
+        Lang::En => "nothing came back from the browser in 10 minutes",
+        Lang::Th => "เบราว์เซอร์ไม่ตอบกลับภายใน 10 นาที",
+    }
+}
+pub fn login_state(l: Lang) -> &'static str {
+    match l {
+        Lang::En => "the browser came back from a different sign-in, try again",
+        Lang::Th => "เบราว์เซอร์ส่งกลับมาจากการ login อื่น ลองใหม่อีกครั้ง",
+    }
+}
+pub fn login_port_busy(l: Lang, port: u16) -> String {
+    match l {
+        Lang::En => format!("port {port} is in use — close any \"codex login\" still running and try again"),
+        Lang::Th => format!("พอร์ต {port} ถูกใช้อยู่ — ปิด \"codex login\" ที่ค้างอยู่แล้วลองใหม่"),
+    }
+}
+/// The browser page at the end of a sign-in: title and text.
+pub fn login_page(l: Lang, s: crate::model::Svc, err: Option<&str>) -> (String, String) {
+    let svc = s.name();
+    match (l, err) {
+        (Lang::En, None) => (format!("Signed in to {svc}"), "You can close this tab and go back to Ai Quota Overlay.".into()),
+        (Lang::En, Some(e)) => (format!("Couldn't sign in to {svc}"), e.to_string()),
+        (Lang::Th, None) => (format!("login {svc} แล้ว"), "ปิดแท็บนี้แล้วกลับไปที่ Ai Quota Overlay ได้เลย".into()),
+        (Lang::Th, Some(e)) => (format!("login {svc} ไม่สำเร็จ"), e.to_string()),
+    }
+}
+
 pub fn updated(l: Lang, time: &str) -> String {
     match l {
         Lang::En => format!("Updated {time}"),
@@ -430,20 +532,16 @@ pub fn error_text(e: &QErr, l: Lang) -> String {
     let message = e.message.clone().unwrap_or_default();
     match (l, e.code.as_str()) {
         (Lang::En, "offline") => "Can't reach the internet".into(),
-        (Lang::En, "claudeExpired") => format!("Login expired ({status}) — run claude in a terminal, then /login"),
-        (Lang::En, "claudeExpiredKeychain") => "Login expired — open claude in a terminal once".into(),
         (Lang::En, "rateLimited") => "Too many requests (429), waiting a bit".into(),
         (Lang::En, "status") => format!("{service} returned {status}"),
-        (Lang::En, "codexExpired") => "Login expired — open the Codex app once".into(),
-        (Lang::En, "cursorExpired") => "Login expired — open the Cursor app once".into(),
+        (Lang::En, "appExpired") => "Login expired — sign in again in Settings".into(),
+        (Lang::En, "noCopilot") => "This GitHub account has no Copilot".into(),
         (Lang::En, _) => format!("Error: {message}"),
         (Lang::Th, "offline") => "ต่ออินเทอร์เน็ตไม่ได้".into(),
-        (Lang::Th, "claudeExpired") => format!("login หมดอายุ ({status}) — เปิด terminal พิมพ์ claude แล้ว /login"),
-        (Lang::Th, "claudeExpiredKeychain") => "login หมดอายุ — เปิด claude ใน terminal สักครั้ง".into(),
         (Lang::Th, "rateLimited") => "ถูกจำกัดการเช็ค (429) รอสักครู่".into(),
         (Lang::Th, "status") => format!("{service} ตอบ {status}"),
-        (Lang::Th, "codexExpired") => "login หมดอายุ — เปิดแอป Codex สักครั้ง".into(),
-        (Lang::Th, "cursorExpired") => "login หมดอายุ — เปิดแอป Cursor สักครั้ง".into(),
+        (Lang::Th, "appExpired") => "login หมดอายุ — login ใหม่ในหน้าตั้งค่า".into(),
+        (Lang::Th, "noCopilot") => "บัญชี GitHub นี้ไม่มี Copilot".into(),
         (Lang::Th, _) => format!("ผิดพลาด: {message}"),
     }
 }

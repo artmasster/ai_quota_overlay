@@ -1,13 +1,16 @@
 //! Quota data shared by the fetchers and the UI.
 use serde::{Deserialize, Serialize};
 
-pub const SERVICES: [Svc; 3] = [Svc::Claude, Svc::Codex, Svc::Cursor];
+pub const SERVICES: [Svc; 4] = [Svc::Claude, Svc::Codex, Svc::Cursor, Svc::Copilot];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Svc {
+    #[default]
     Claude,
     Codex,
     Cursor,
+    /// GitHub Copilot.
+    Copilot,
 }
 
 impl Svc {
@@ -16,6 +19,7 @@ impl Svc {
             Svc::Claude => "claude",
             Svc::Codex => "codex",
             Svc::Cursor => "cursor",
+            Svc::Copilot => "copilot",
         }
     }
     pub fn name(self) -> &'static str {
@@ -23,12 +27,48 @@ impl Svc {
             Svc::Claude => "Claude",
             Svc::Codex => "Codex",
             Svc::Cursor => "Cursor",
+            Svc::Copilot => "Copilot",
         }
     }
 
-    pub fn index(self) -> usize {
-        self as usize
+    pub fn from_key(k: &str) -> Option<Svc> {
+        SERVICES.into_iter().find(|s| s.key() == k)
     }
+}
+
+/// One account signed in here. `id` is the service key plus a random suffix ("claude-3f9a2c"); settings and the
+/// cache are keyed by it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Acct {
+    pub id: String,
+    pub svc: Svc,
+    /// Email (or name) of the account, when known.
+    pub who: String,
+}
+
+impl Acct {
+    pub fn aid(&self) -> Aid {
+        aid(&self.id)
+    }
+}
+
+/// A copyable stand-in for an account id (hit targets and hover keys need `Copy`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Aid(pub u64);
+
+/// FNV-1a of the id: stable across runs and reorderings.
+pub fn aid(id: &str) -> Aid {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in id.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    Aid(h)
+}
+
+/// The short form of `who` for tight spots: an email's name part.
+pub fn short_who(who: &str) -> &str {
+    who.split('@').next().unwrap_or(who)
 }
 
 /// One quota window. `span` in seconds; `name` (a model) or `tag` (worded by i18n); `billing` = a billing cycle.
@@ -136,16 +176,24 @@ impl Quota {
     }
 }
 
+/// Every account's result, by service (Claude, Codex, Cursor), each service's own login first.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Snapshot {
-    pub svc: [Option<Quota>; 3],
+    pub accts: Vec<(Acct, Quota)>,
     /// Unix ms.
     pub fetched_at: i64,
 }
 
 impl Snapshot {
-    pub fn get(&self, s: Svc) -> Option<&Quota> {
-        self.svc[s.index()].as_ref()
+    pub fn get(&self, id: &str) -> Option<&Quota> {
+        self.accts.iter().find(|(a, _)| a.id == id).map(|(_, q)| q)
+    }
+    pub fn by_aid(&self, x: Aid) -> Option<&(Acct, Quota)> {
+        self.accts.iter().find(|(a, _)| a.aid() == x)
+    }
+    /// How many of the service's accounts are checked and logged in (more than one: they are told apart by `who`).
+    pub fn count(&self, s: Svc) -> usize {
+        self.accts.iter().filter(|(a, q)| a.svc == s && !q.absent).count()
     }
 }
 

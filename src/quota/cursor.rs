@@ -1,57 +1,22 @@
-//! Cursor usage, with the login Cursor keeps in its `state.vscdb` (SQLite, read with crate::sqlite).
+//! Cursor usage, for an account signed in here with the Cursor app's own browser sign-in (see `login`).
 
-use std::path::Path;
-
-use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig};
-use base64::engine::DecodePaddingMode;
-use base64::Engine;
 use chrono::{Datelike, Days, LocalResult, NaiveDate, TimeZone};
-use serde_json::Value;
+use serde_json::{json, Value};
 
-use super::{entries_of, entry, js_number, parse_date_ms, qerr, truthy, FetchErr, Res};
+use super::store::{self, Saved};
+use super::{encode_uri_component, entries_of, entry, js_number, jwt_exp_ms, jwt_payload, parse_date_ms, qerr, truthy, FetchErr, Res};
+use crate::http;
 use crate::model::{now_ms, Extra, QErr, Quota, Win};
-use crate::{http, sqlite};
 
-const TOKEN_KEY: &str = "cursorAuth/accessToken";
-const PLAN_KEY: &str = "cursorAuth/stripeMembershipType";
 const SUMMARY_URL: &str = "https://cursor.com/api/usage-summary";
 const OLD_USAGE_URL: &str = "https://cursor.com/api/usage?user=";
-
-fn read_auth(db: &Path) -> Res<(String, String)> {
-    if !db.exists() {
-        return Err(FetchErr::NotLoggedIn);
-    }
-    let m = sqlite::read_item_table(db, &[TOKEN_KEY, PLAN_KEY])?;
-    let token = match m.get(TOKEN_KEY) {
-        Some(t) if !t.is_empty() => String::from_utf8_lossy(t).into_owned(),
-        _ => return Err(FetchErr::NotLoggedIn),
-    };
-    let plan = m.get(PLAN_KEY).map(|p| String::from_utf8_lossy(p).into_owned()).unwrap_or_default();
-    Ok((token, plan))
-}
-
-/// The JSON payload of a JWT (base64url, padding optional, like Node's `base64url` decoding).
-fn jwt_payload(token: &str) -> Option<Value> {
-    const ENGINE: GeneralPurpose = GeneralPurpose::new(
-        &base64::alphabet::URL_SAFE,
-        GeneralPurposeConfig::new()
-            .with_encode_padding(false)
-            .with_decode_padding_mode(DecodePaddingMode::Indifferent)
-            .with_decode_allow_trailing_bits(true),
-    );
-    let part = token.split('.').nth(1)?;
-    let cleaned: String = part
-        .chars()
-        .filter_map(|c| match c {
-            '+' => Some('-'),
-            '/' => Some('_'),
-            c if c.is_ascii_alphanumeric() || c == '-' || c == '_' => Some(c),
-            _ => None,
-        })
-        .collect();
-    let bytes = ENGINE.decode(cleaned).ok()?;
-    serde_json::from_str(&String::from_utf8_lossy(&bytes)).ok()
-}
+const ME_URL: &str = "https://cursor.com/api/auth/me";
+/// The Cursor app's sign-in: the browser page, then this app asks until the page says yes.
+const LOGIN_URL: &str = "https://cursor.com/loginDeepControl";
+const POLL_URL: &str = "https://api2.cursor.sh/auth/poll";
+const REFRESH_URL: &str = "https://api2.cursor.sh/oauth/token";
+/// Public OAuth client of the Cursor app (its token refresh).
+const CLIENT_ID: &str = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB";
 
 /// `String(payload.sub).split('|').pop()`.
 fn user_id(payload: &Value) -> String {
@@ -61,19 +26,6 @@ fn user_id(payload: &Value) -> String {
         Some(v) => v.to_string(),
     };
     sub.rsplit('|').next().unwrap_or_default().to_string()
-}
-
-/// JS `encodeURIComponent`.
-fn encode_uri_component(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
 }
 
 /// JS `d.setMonth(d.getMonth() + 1)` in time zone `tz`: same local day and time a month later, with JS's
@@ -146,14 +98,13 @@ fn old_quota<Tz: TimeZone>(entries: &[(String, Value)], plan: &str, tz: &Tz) -> 
     Quota { plan: plan.to_string(), windows, extra: None, ..Quota::default() }
 }
 
-pub(super) fn fetch(db: &Path) -> Res<Quota> {
-    let (token, plan) = read_auth(db)?;
-    let payload = jwt_payload(&token).ok_or_else(|| FetchErr::Unexpected("could not decode the Cursor access token".into()))?;
-    if truthy(payload.get("exp")) && js_number(payload.get("exp")).is_some_and(|e| e * 1000.0 < now_ms() as f64) {
-        return Err(qerr("cursorExpired"));
-    }
-    let user = user_id(&payload);
-    let cookie = format!("WorkosCursorSessionToken={user}%3A%3A{token}");
+/// The dashboard's session cookie for a Cursor access token.
+fn cookie(user: &str, token: &str) -> String {
+    format!("WorkosCursorSessionToken={user}%3A%3A{token}")
+}
+
+fn usage(token: &str, user: &str, plan: &str) -> Res<Quota> {
+    let cookie = cookie(user, token);
     let headers = [("Cookie", cookie.as_str()), ("Origin", "https://cursor.com")];
 
     // Current (usage-based) plans.
@@ -162,24 +113,101 @@ pub(super) fn fetch(db: &Path) -> Res<Quota> {
         return Err(qerr("cursorExpired"));
     }
     if res.ok() {
-        return Ok(summary_quota(&res.json()?, &plan));
+        return Ok(summary_quota(&res.json()?, plan));
     }
 
     // Older request-count plans.
-    let old = http::get(&format!("{OLD_USAGE_URL}{}", encode_uri_component(&user)), &headers)?;
+    let old = http::get(&format!("{OLD_USAGE_URL}{}", encode_uri_component(user)), &headers)?;
     if !old.ok() && (res.status == 429 || old.status == 429) {
         return Err(FetchErr::Quota(QErr::rate_limited(res.retry_at.max(old.retry_at))));
     }
     if !old.ok() {
         return Err(FetchErr::Quota(QErr::status("Cursor", format!("{}/{}", res.status, old.status))));
     }
-    Ok(old_quota(&entries_of(&old.body)?, &plan, &chrono::Local))
+    Ok(old_quota(&entries_of(&old.body)?, plan, &chrono::Local))
+}
+
+// ---------- accounts signed in here ----------
+
+pub(crate) fn login_url(challenge: &str, uuid: &str) -> String {
+    format!("{LOGIN_URL}?{}", super::query(&[("challenge", challenge), ("uuid", uuid), ("mode", "login")]))
+}
+
+/// One ask whether the browser sign-in `uuid` went through: None while it hasn't (yet).
+pub(crate) fn poll(uuid: &str, verifier: &str) -> Res<Option<Saved>> {
+    let res = http::get(&format!("{POLL_URL}?{}", super::query(&[("uuid", uuid), ("verifier", verifier)])), &[])?;
+    if res.status == 404 {
+        return Ok(None);
+    }
+    if !res.ok() {
+        return Err(FetchErr::Quota(QErr::status("Cursor", res.status)));
+    }
+    let v: Value = res.json()?;
+    let access = v.get("accessToken").and_then(Value::as_str).unwrap_or_default().to_string();
+    if access.is_empty() {
+        return Ok(None);
+    }
+    let user = match v.get("authId").and_then(Value::as_str) {
+        Some(a) if !a.is_empty() => a.rsplit('|').next().unwrap_or(a).to_string(),
+        _ => jwt_payload(&access).map(|p| user_id(&p)).unwrap_or_default(),
+    };
+    let mut s = Saved {
+        svc: "cursor".into(),
+        refresh: v.get("refreshToken").and_then(Value::as_str).unwrap_or(&access).to_string(),
+        expires_at: jwt_exp_ms(&access),
+        account: user,
+        access,
+        ..Saved::default()
+    };
+    let c = cookie(&s.account, &s.access);
+    if let Some(me) = http::get(ME_URL, &[("Cookie", c.as_str()), ("Origin", "https://cursor.com")]).ok().filter(|r| r.status == 200) {
+        if let Ok(m) = me.json::<Value>() {
+            s.email = m.get("email").and_then(Value::as_str).unwrap_or_default().to_string();
+        }
+    }
+    Ok(Some(s))
+}
+
+/// A new access token for account `s`, stored; a refusal (or "log out") means signing in again.
+fn refresh(s: &Saved) -> Res<Saved> {
+    let res = http::post_json(REFRESH_URL, &[], &json!({"grant_type": "refresh_token", "client_id": CLIENT_ID, "refresh_token": s.refresh}))?;
+    let v: Value = if res.ok() { res.json()? } else { Value::Null };
+    let access = v.get("access_token").and_then(Value::as_str).unwrap_or_default();
+    if access.is_empty() || truthy(v.get("shouldLogout")) {
+        return Err(super::app_expired("Cursor", (!res.ok()).then(|| res.status.to_string())));
+    }
+    let access = access.to_string();
+    let stored = store::update(&s.id, |x| {
+        if x.refresh == s.refresh {
+            x.expires_at = jwt_exp_ms(&access);
+            x.access = access.clone();
+        }
+    })?;
+    stored.ok_or(FetchErr::NotLoggedIn)
+}
+
+pub(super) fn fetch(id: &str) -> Res<Quota> {
+    let mut s = store::get(id).ok_or(FetchErr::NotLoggedIn)?;
+    if s.expires_at > 0 && s.expires_at - now_ms() < 60_000 {
+        s = refresh(&s)?;
+    }
+    match usage(&s.access, &s.account, &s.plan) {
+        Err(FetchErr::Quota(e)) if e.code == "cursorExpired" => {
+            s = refresh(&s)?;
+            usage(&s.access, &s.account, &s.plan).map_err(|e| match e {
+                FetchErr::Quota(q) if q.code == "cursorExpired" => super::app_expired("Cursor", None),
+                e => e,
+            })
+        }
+        r => r,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
+    use base64::Engine;
     use chrono::{FixedOffset, Utc};
     use serde_json::json;
 
@@ -271,14 +299,4 @@ mod tests {
         assert!(add_month(start, &chrono::Local).is_some());
     }
 
-    #[test]
-    fn reads_auth_from_fixture_db() {
-        let db = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/small.db");
-        let (token, plan) = read_auth(&db).unwrap();
-        assert_eq!(plan, "pro");
-        let payload = jwt_payload(&token).unwrap();
-        assert_eq!(user_id(&payload), "user_fixture");
-        let missing = std::env::temp_dir().join(format!("aqo-cursor-missing-{}.vscdb", std::process::id()));
-        assert_eq!(read_auth(&missing).unwrap_err(), FetchErr::NotLoggedIn);
-    }
 }

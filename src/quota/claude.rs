@@ -1,19 +1,22 @@
-//! Claude (claude.ai subscription) usage, with the login Claude Code keeps in `~/.claude/.credentials.json`
-//! (or the macOS Keychain).
+//! Claude (claude.ai subscription) usage, for an account signed in here with Claude Code's own browser sign-in
+//! (see `login`).
 
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use serde_json::{json, Value};
 
-use serde_json::{json, Map, Value};
-
-use super::{entries_of, entry, qerr, read_json, truthy, FetchErr, Res};
+use super::store::{self, Saved};
+use super::{entries_of, entry, truthy, FetchErr, Res};
 use crate::http;
 use crate::model::{now_ms, Extra, QErr, Quota, Win};
 
-/// Public OAuth client of Claude Code; used only to refresh the user's own token.
+/// Public OAuth client of Claude Code: signs the user in to their own account and refreshes its token.
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
+/// What Claude Code asks for when it signs in with a claude.ai account.
+const SCOPES: &str = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 const TOKEN_URLS: [&str; 2] = ["https://platform.claude.com/v1/oauth/token", "https://console.anthropic.com/v1/oauth/token"];
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
+const BETA: (&str, &str) = ("anthropic-beta", "oauth-2025-04-20");
 
 const H: f64 = 3600.0;
 
@@ -29,84 +32,9 @@ fn known(key: &str) -> Option<(f64, Option<&'static str>, Option<&'static str>)>
     })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Source {
-    File,
-    Keychain,
-}
-
-/// The `claudeAiOauth` object (Null when absent) and where it came from.
-fn read_oauth(creds: &Path) -> Res<(Value, Source)> {
-    if creds.exists() {
-        let v = read_json(creds)?;
-        return Ok((v.get("claudeAiOauth").cloned().unwrap_or(Value::Null), Source::File));
-    }
-    #[cfg(target_os = "macos")]
-    if let Some(raw) = keychain() {
-        if let Ok(v) = serde_json::from_str::<Value>(&raw) {
-            return Ok((v.get("claudeAiOauth").cloned().unwrap_or(Value::Null), Source::Keychain));
-        }
-    }
-    Err(FetchErr::NotLoggedIn)
-}
-
-#[cfg(target_os = "macos")]
-fn keychain() -> Option<String> {
-    use std::io::Read;
-    use std::process::{Command, Stdio};
-    use std::time::{Duration, Instant};
-    let mut child = Command::new("security")
-        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        match child.try_wait() {
-            Ok(Some(st)) if st.success() => {
-                let mut s = String::new();
-                child.stdout.take()?.read_to_string(&mut s).ok()?;
-                return Some(s);
-            }
-            Ok(Some(_)) | Err(_) => return None,
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-        }
-    }
-}
-
-fn access_token(creds: &Path, force: bool) -> Res<String> {
-    let (oauth, source) = read_oauth(creds)?;
-    let token = match oauth.get("accessToken").and_then(Value::as_str) {
-        Some(t) if !t.is_empty() => t.to_string(),
-        _ => return Err(FetchErr::NotLoggedIn),
-    };
-    let expires_at = super::js_number(oauth.get("expiresAt"));
-    if !force && expires_at.is_some_and(|e| e - now_ms() as f64 > 60_000.0) {
-        return Ok(token);
-    }
-    // Refreshing rotates the refresh token; only do it where the new one can be written back for the CLI.
-    if source != Source::File {
-        return Err(qerr("claudeExpiredKeychain"));
-    }
-    refresh(creds, &oauth)
-}
-
-fn refresh(creds: &Path, oauth: &Value) -> Res<String> {
-    let mut body = Map::new();
-    body.insert("grant_type".into(), json!("refresh_token"));
-    if let Some(rt) = oauth.get("refreshToken") {
-        body.insert("refresh_token".into(), rt.clone());
-    }
-    body.insert("client_id".into(), json!(CLIENT_ID));
-    let body = Value::Object(body);
-
+/// Posts `body` to the token endpoint (the current one, then the old one); the answer of the first that says yes.
+/// A refusal means signing in again.
+fn token_request(body: Value) -> Res<Value> {
     let mut last_status = 0u16;
     for url in TOKEN_URLS {
         let Ok(res) = http::post_json(url, &[], &body) else { continue };
@@ -114,84 +42,92 @@ fn refresh(creds: &Path, oauth: &Value) -> Res<String> {
         if !res.ok() {
             continue;
         }
-        let t: Value = res.json()?;
-        return write_back(creds, oauth.get("refreshToken"), &t, now_ms());
+        return Ok(res.json()?);
     }
-    Err(if last_status != 0 {
-        FetchErr::Quota(QErr { code: "claudeExpired".into(), status: Some(last_status.to_string()), ..QErr::default() })
-    } else {
-        FetchErr::Offline
-    })
+    Err(if last_status != 0 { super::app_expired("Claude", Some(last_status.to_string())) } else { FetchErr::Offline })
 }
 
-/// Stores a refresh response `t` and returns the access token to use. Re-reads the file first, so a refresh
-/// done meanwhile by the CLI (its refresh token no longer `old_refresh`) is not overwritten: then the file's
-/// current access token is used instead.
-fn write_back(creds: &Path, old_refresh: Option<&Value>, t: &Value, now: i64) -> Res<String> {
-    let mut current = read_json(creds)?;
-    let cur = current.get("claudeAiOauth");
-    if cur.and_then(|o| o.get("refreshToken")) != old_refresh {
-        return cur
-            .and_then(|o| o.get("accessToken"))
-            .and_then(Value::as_str)
-            .map(String::from)
-            .ok_or_else(|| FetchErr::Unexpected("Claude credentials changed without an access token".into()));
+/// The browser page that asks the user to let this app see their account; it comes back to `redirect` with a code.
+pub(crate) fn authorize_url(redirect: &str, challenge: &str, state: &str) -> String {
+    let q = super::query(&[
+        ("code", "true"),
+        ("client_id", CLIENT_ID),
+        ("response_type", "code"),
+        ("redirect_uri", redirect),
+        ("scope", SCOPES),
+        ("code_challenge", challenge),
+        ("code_challenge_method", "S256"),
+        ("state", state),
+    ]);
+    format!("{AUTHORIZE_URL}?{q}")
+}
+
+/// "claude_max" → "max", as Claude Code names its subscription types.
+fn plan_of(org_type: &str) -> String {
+    org_type.strip_prefix("claude_").unwrap_or(org_type).to_string()
+}
+
+/// Turns the code from the browser into tokens, and finds the account's email and plan.
+pub(crate) fn sign_in(code: &str, redirect: &str, verifier: &str, state: &str) -> Res<Saved> {
+    let t = token_request(json!({
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect,
+        "client_id": CLIENT_ID,
+        "code_verifier": verifier,
+        "state": state,
+    }))
+    .map_err(|e| match e {
+        // Refused at sign-in: say so with the status, not "sign in again".
+        FetchErr::Quota(q) => FetchErr::Quota(QErr::status("Claude", q.status.unwrap_or_default())),
+        e => e,
+    })?;
+    let access = t.get("access_token").and_then(Value::as_str).unwrap_or_default().to_string();
+    if access.is_empty() {
+        return Err(FetchErr::Unexpected("the sign-in returned no access_token".into()));
     }
+    let mut s = Saved {
+        svc: "claude".into(),
+        email: t.pointer("/account/email_address").and_then(Value::as_str).unwrap_or_default().to_string(),
+        access,
+        refresh: t.get("refresh_token").and_then(Value::as_str).unwrap_or_default().to_string(),
+        expires_at: now_ms() + (t.get("expires_in").and_then(Value::as_f64).unwrap_or(3600.0) * 1000.0) as i64,
+        ..Saved::default()
+    };
+    // The plan (and the email, if the token answer had none) from the profile; the numbers work without it.
+    let auth = format!("Bearer {}", s.access);
+    if let Some(res) = http::get(PROFILE_URL, &[("Authorization", auth.as_str()), BETA]).ok().filter(|r| r.ok()) {
+        if let Ok(p) = res.json::<Value>() {
+            s.plan = plan_of(p.pointer("/organization/organization_type").and_then(Value::as_str).unwrap_or_default());
+            if s.email.is_empty() {
+                s.email = p.pointer("/account/email").and_then(Value::as_str).unwrap_or_default().to_string();
+            }
+        }
+    }
+    Ok(s)
+}
+
+/// A fresh access token for account `id`, refreshed (and stored) when it is about to run out or `force`.
+fn token(id: &str, force: bool) -> Res<String> {
+    let s = store::get(id).ok_or(FetchErr::NotLoggedIn)?;
+    if !force && s.expires_at - now_ms() > 60_000 {
+        return Ok(s.access);
+    }
+    let t = token_request(json!({"grant_type": "refresh_token", "refresh_token": s.refresh, "client_id": CLIENT_ID}))?;
     let Some(access) = t.get("access_token").and_then(Value::as_str) else {
         return Err(FetchErr::Unexpected("token refresh returned no access_token".into()));
     };
-    let Some(root) = current.as_object_mut() else {
-        return Err(FetchErr::Unexpected("Claude credentials are not a JSON object".into()));
-    };
-    let mut oauth = match root.get("claudeAiOauth") {
-        Some(Value::Object(m)) => m.clone(),
-        _ => Map::new(),
-    };
-    oauth.insert("accessToken".into(), json!(access));
-    let refresh = match t.get("refresh_token") {
-        Some(v) if !v.is_null() => Some(v.clone()),
-        _ => old_refresh.cloned(),
-    };
-    match refresh {
-        Some(r) => oauth.insert("refreshToken".into(), r),
-        None => oauth.remove("refreshToken"),
-    };
-    let expires_in = t.get("expires_in").and_then(Value::as_f64).unwrap_or(3600.0);
-    let expires_at = now as f64 + expires_in * 1000.0;
-    let expires_at = if expires_at.fract() == 0.0 && expires_at.abs() < 9e15 { json!(expires_at as i64) } else { json!(expires_at) };
-    oauth.insert("expiresAt".into(), expires_at);
-    root.insert("claudeAiOauth".into(), Value::Object(oauth));
-    write_json_atomic(creds, &current)?;
-    Ok(access.to_string())
-}
-
-fn tmp_path(file: &Path) -> PathBuf {
-    let mut s = file.as_os_str().to_owned();
-    s.push(".quota-overlay.tmp");
-    PathBuf::from(s)
-}
-
-/// Writes `<file>.quota-overlay.tmp` (mode 0600 on unix) and renames it over `file`.
-fn write_json_atomic(file: &Path, data: &Value) -> std::io::Result<()> {
-    let tmp = tmp_path(file);
-    let result = (|| {
-        let mut o = std::fs::OpenOptions::new();
-        o.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            o.mode(0o600);
+    let refresh = t.get("refresh_token").and_then(Value::as_str).unwrap_or(&s.refresh).to_string();
+    let expires_at = now_ms() + (t.get("expires_in").and_then(Value::as_f64).unwrap_or(3600.0) * 1000.0) as i64;
+    // Signed in again meanwhile (new tokens): keep those.
+    let stored = store::update(id, |x| {
+        if x.refresh == s.refresh {
+            x.access = access.to_string();
+            x.refresh = refresh;
+            x.expires_at = expires_at;
         }
-        let mut f = o.open(&tmp)?;
-        f.write_all(&serde_json::to_vec(data)?)?;
-        f.sync_all()?;
-        drop(f);
-        std::fs::rename(&tmp, file)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
+    })?;
+    stored.map(|x| x.access).ok_or(FetchErr::NotLoggedIn)
 }
 
 /// Usage response entries (in document order) → windows and extra usage.
@@ -223,19 +159,22 @@ fn windows(entries: &[(String, Value)]) -> (Vec<Win>, Option<Extra>) {
     (windows, extra)
 }
 
-pub(super) fn fetch(creds: &Path) -> Res<Quota> {
-    let plan = read_oauth(creds)?.0.get("subscriptionType").and_then(Value::as_str).unwrap_or("").to_string();
+/// Account `id`'s usage; a 401 tries once more with a refreshed token.
+pub(super) fn fetch(id: &str) -> Res<Quota> {
+    let plan = store::get(id).ok_or(FetchErr::NotLoggedIn)?.plan;
     let call = |token: String| {
         let auth = format!("Bearer {token}");
-        http::get(USAGE_URL, &[("Authorization", auth.as_str()), ("anthropic-beta", "oauth-2025-04-20")])
+        http::get(USAGE_URL, &[("Authorization", auth.as_str()), BETA])
     };
-
-    let mut res = call(access_token(creds, false)?)?;
+    let mut res = call(token(id, false)?)?;
     if res.status == 401 {
-        res = call(access_token(creds, true)?)?;
+        res = call(token(id, true)?)?;
     }
     if res.status == 429 {
         return Err(FetchErr::Quota(QErr::rate_limited(res.retry_at)));
+    }
+    if res.status == 401 {
+        return Err(super::app_expired("Claude", Some("401".into())));
     }
     if !res.ok() {
         return Err(FetchErr::Quota(QErr::status("Claude", res.status)));
@@ -248,11 +187,15 @@ pub(super) fn fetch(creds: &Path) -> Res<Quota> {
 mod tests {
     use super::*;
 
-    fn scratch(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("aqo-claude-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    #[test]
+    fn sign_in_pieces() {
+        let u = authorize_url("http://localhost:5555/callback", "chal", "st");
+        assert!(u.starts_with("https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-"), "{u}");
+        assert!(u.contains("&redirect_uri=http%3A%2F%2Flocalhost%3A5555%2Fcallback&scope=user%3Aprofile%20user%3Ainference"), "{u}");
+        assert!(u.ends_with("&code_challenge=chal&code_challenge_method=S256&state=st"), "{u}");
+        assert_eq!(plan_of("claude_max"), "max");
+        assert_eq!(plan_of("claude_pro"), "pro");
+        assert_eq!(plan_of(""), "");
     }
 
     #[test]
@@ -283,76 +226,5 @@ mod tests {
         let (w, extra) = windows(&entries_of(br#"{"seven_day_oauth_apps": {"utilization": 1}, "extra_usage": {"is_enabled": false}}"#).unwrap());
         assert_eq!(w[0].tag.as_deref(), Some("otherApps"));
         assert_eq!(extra, None);
-    }
-
-    #[test]
-    fn atomic_write_replaces_file() {
-        let d = scratch("atomic");
-        let f = d.join(".credentials.json");
-        std::fs::write(&f, b"{\"old\":true}").unwrap();
-        write_json_atomic(&f, &json!({"new": 1})).unwrap();
-        assert_eq!(read_json(&f).unwrap(), json!({"new": 1}));
-        assert!(!tmp_path(&f).exists());
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn write_back_stores_new_tokens() {
-        let d = scratch("store");
-        let f = d.join(".credentials.json");
-        let creds = json!({
-            "claudeAiOauth": {"accessToken": "a-old", "refreshToken": "r-old", "expiresAt": 1, "scopes": ["x"], "subscriptionType": "max"},
-            "other": {"keep": true}
-        });
-        std::fs::write(&f, serde_json::to_vec(&creds).unwrap()).unwrap();
-        let t = json!({"access_token": "a-new", "refresh_token": "r-new", "expires_in": 28800});
-        let got = write_back(&f, Some(&json!("r-old")), &t, 1_000_000).unwrap();
-        assert_eq!(got, "a-new");
-        let now = read_json(&f).unwrap();
-        assert_eq!(now["claudeAiOauth"]["accessToken"], "a-new");
-        assert_eq!(now["claudeAiOauth"]["refreshToken"], "r-new");
-        assert_eq!(now["claudeAiOauth"]["expiresAt"], json!(1_000_000 + 28_800_000));
-        assert_eq!(now["claudeAiOauth"]["scopes"], json!(["x"]));
-        assert_eq!(now["claudeAiOauth"]["subscriptionType"], "max");
-        assert_eq!(now["other"], json!({"keep": true}));
-        assert!(!tmp_path(&f).exists());
-
-        // No new refresh token / expiry in the response: keep the old one, default to an hour.
-        let t = json!({"access_token": "a-3"});
-        assert_eq!(write_back(&f, Some(&json!("r-new")), &t, 5).unwrap(), "a-3");
-        let now = read_json(&f).unwrap();
-        assert_eq!(now["claudeAiOauth"]["refreshToken"], "r-new");
-        assert_eq!(now["claudeAiOauth"]["expiresAt"], json!(5 + 3_600_000));
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn write_back_defers_to_a_newer_cli_refresh() {
-        let d = scratch("defer");
-        let f = d.join(".credentials.json");
-        // The CLI refreshed meanwhile: the file's refresh token is no longer the one we used.
-        let creds = br#"{"claudeAiOauth":{"accessToken":"a-cli","refreshToken":"r-cli","expiresAt":99}}"#;
-        std::fs::write(&f, creds).unwrap();
-        let t = json!({"access_token": "a-ours", "refresh_token": "r-ours", "expires_in": 3600});
-        assert_eq!(write_back(&f, Some(&json!("r-old")), &t, 0).unwrap(), "a-cli");
-        assert_eq!(std::fs::read(&f).unwrap(), creds.to_vec(), "file must be untouched");
-        assert!(!tmp_path(&f).exists());
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn read_oauth_and_expiry_without_network() {
-        let d = scratch("oauth");
-        let f = d.join(".credentials.json");
-        assert_eq!(read_oauth(&f).unwrap_err(), FetchErr::NotLoggedIn);
-        std::fs::write(&f, br#"{"other":1}"#).unwrap();
-        assert_eq!(access_token(&f, false).unwrap_err(), FetchErr::NotLoggedIn);
-        let far = now_ms() + 3_600_000;
-        std::fs::write(&f, format!(r#"{{"claudeAiOauth":{{"accessToken":"a","refreshToken":"r","expiresAt":{far}}}}}"#)).unwrap();
-        // Still valid for more than a minute: no refresh, no HTTP.
-        assert_eq!(access_token(&f, false).unwrap(), "a");
-        std::fs::write(&f, b"{not json").unwrap();
-        assert!(matches!(read_oauth(&f), Err(FetchErr::Unexpected(_))));
-        let _ = std::fs::remove_dir_all(&d);
     }
 }

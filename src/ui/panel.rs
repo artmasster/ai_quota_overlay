@@ -14,9 +14,18 @@ const CONTENT_W: f32 = W - 26.0;
 pub struct PanelIn<'a> {
     pub lang: Lang,
     pub svc: Svc,
+    /// Whose account (a line under the head), when the service has more than one.
+    pub who: Option<&'a str>,
     pub q: &'a Quota,
     pub index: i32,
     pub now: i64,
+}
+
+const HEAD_Y: f32 = 11.0;
+
+/// Where the content starts: under the head, and under the account line when there is one.
+fn top(inp: &PanelIn) -> f32 {
+    HEAD_Y + 20.0 + if inp.who.is_some() { 4.0 + hint_style().lh + 6.0 } else { 8.0 }
 }
 
 /// Hover amount of the × button.
@@ -99,7 +108,7 @@ fn rows(inp: &PanelIn) -> Vec<(super::svg::Icon, String, String, String, String)
 }
 
 pub fn layout(f: &mut Fonts, inp: &PanelIn) -> PanelLayout {
-    let mut y = 11.0 + 20.0 + 8.0;
+    let mut y = top(inp);
     if !inp.q.ok {
         let msg = inp.q.error.as_ref().map(|e| i18n::error_text(e, inp.lang)).unwrap_or_default();
         y += f.lay(&msg, &err_style(), Some(CONTENT_W)).h;
@@ -135,7 +144,7 @@ pub fn draw(c: &mut Canvas, f: &mut Fonts, l: &PanelLayout, inp: &PanelIn, fx: &
     c.fill_rrect(R::new(15.0, 1.0, W - 30.0, 2.0), [0.0, 0.0, 2.0, 2.0], accent);
 
     // ---------- head ----------
-    let hy = 11.0;
+    let hy = HEAD_Y;
     let mid = hy + 10.0;
     let mut x = CONTENT_X;
     c.fill_circle(x + 4.0, mid, 4.0, accent);
@@ -165,6 +174,11 @@ pub fn draw(c: &mut Canvas, f: &mut Fonts, l: &PanelLayout, inp: &PanelIn, fx: &
     let xs = Style::new(15.0, 400, MUTED.lerp(TEXT, fx.close_hover), 1.0).lh_px(20.0);
     let xw = f.width("×", &xs);
     f.draw(c, l.close.cx() - xw / 2.0, l.close.y, "×", &xs, None, 0.0);
+    if let Some(who) = inp.who {
+        let ws = hint_style();
+        let line = f.ellipsize(who, &ws, CONTENT_W - 14.0);
+        f.draw(c, CONTENT_X + 14.0, hy + 20.0 + 4.0, &line, &ws, None, 0.0);
+    }
 
     if let Some(fy) = l.foot {
         let (err, note) = foot_texts(inp);
@@ -174,7 +188,7 @@ pub fn draw(c: &mut Canvas, f: &mut Fonts, l: &PanelLayout, inp: &PanelIn, fx: &
         f.draw(c, CONTENT_X, ey + lay.h + 3.0, &note, &hint_style(), Some(CONTENT_W), 0.0);
     }
 
-    let y = hy + 20.0 + 8.0;
+    let y = top(inp);
     if !inp.q.ok {
         let msg = inp.q.error.as_ref().map(|e| i18n::error_text(e, inp.lang)).unwrap_or_default();
         let lay = f.draw(c, CONTENT_X, y, &msg, &err_style(), Some(CONTENT_W), 0.0);

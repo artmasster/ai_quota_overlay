@@ -73,7 +73,6 @@ thread_local! {
     /// Device px per DIP of each window as last presented.
     static SCALES: [Cell<f64>; 4] = const { [Cell::new(1.0), Cell::new(1.0), Cell::new(1.0), Cell::new(1.0)] };
     static VISIBLE: [Cell<bool>; 4] = const { [Cell::new(false), Cell::new(false), Cell::new(false), Cell::new(false)] };
-    static TRACKING: [Cell<bool>; 4] = const { [Cell::new(false), Cell::new(false), Cell::new(false), Cell::new(false)] };
     static CURSOR: Cell<CursorKind> = const { Cell::new(CursorKind::Default) };
     static TASKBAR_CREATED: Cell<u32> = const { Cell::new(0) };
     static APP_PIXELS: RefCell<(u32, u32, Vec<u8>)> = const { RefCell::new((0, 0, Vec::new())) };
@@ -642,6 +641,32 @@ impl Host for WinHost {
         }
     }
 
+    fn copy_text(&mut self, text: &str) {
+        use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+        use windows::Win32::Foundation::GlobalFree;
+        use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+        const CF_UNICODETEXT: u32 = 13;
+        let w = wide(text);
+        unsafe {
+            if OpenClipboard(hwnd(WinKind::App).or_else(|| Some(HWND(MAIN.with(|m| m.get()) as *mut _)))).is_err() {
+                return;
+            }
+            let _ = EmptyClipboard();
+            if let Ok(mem) = GlobalAlloc(GMEM_MOVEABLE, w.len() * 2) {
+                let p = GlobalLock(mem) as *mut u16;
+                if !p.is_null() {
+                    std::ptr::copy_nonoverlapping(w.as_ptr(), p, w.len());
+                    let _ = GlobalUnlock(mem);
+                    // The clipboard owns the memory once this succeeds.
+                    if SetClipboardData(CF_UNICODETEXT, Some(HANDLE(mem.0))).is_err() {
+                        let _ = GlobalFree(Some(mem));
+                    }
+                }
+            }
+            let _ = CloseClipboard();
+        }
+    }
+
     fn quit(&mut self) {
         unsafe {
             PostQuitMessage(0);
@@ -917,11 +942,12 @@ fn lparam_xy(l: LPARAM) -> (i32, i32) {
 fn mouse(kind: WinKind, h: HWND, m: Mouse, l: LPARAM) {
     let (x, y) = lparam_xy(l);
     let s = SCALES.with(|s| s[idx(kind)].get());
-    if !TRACKING.with(|t| t[idx(kind)].replace(true)) {
-        let mut t = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: h, dwHoverTime: 0 };
-        unsafe {
-            let _ = TrackMouseEvent(&mut t);
-        }
+    // Asked for on every message, not once per entry: the system can drop the request without a WM_MOUSELEAVE
+    // (the window hidden or moved under the pointer), and a flag of our own would then never ask again, leaving
+    // the card lit as if hovered.
+    let mut t = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: h, dwHoverTime: 0 };
+    unsafe {
+        let _ = TrackMouseEvent(&mut t);
     }
     dispatch(Ev::Mouse { w: kind, m, x: x as f64 / s, y: y as f64 / s });
 }
@@ -1004,7 +1030,6 @@ unsafe extern "system" fn layer_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             LRESULT(0)
         }
         WM_MOUSELEAVE => {
-            TRACKING.with(|t| t[idx(kind)].set(false));
             dispatch(Ev::Mouse { w: kind, m: Mouse::Leave, x: -1.0, y: -1.0 });
             LRESULT(0)
         }
@@ -1131,7 +1156,6 @@ unsafe extern "system" fn app_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) ->
             LRESULT(0)
         }
         WM_MOUSELEAVE => {
-            TRACKING.with(|t| t[idx(kind)].set(false));
             dispatch(Ev::Mouse { w: kind, m: Mouse::Leave, x: -1.0, y: -1.0 });
             LRESULT(0)
         }

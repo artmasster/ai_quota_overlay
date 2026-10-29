@@ -8,10 +8,14 @@
 //! Retry-After asks for it), so checking often never turns into hammering anyone's API. A double-click tries such a
 //! service again at once, unless the server's own wait still holds. While a check fails (other than an expired
 //! login) the service keeps showing its last good numbers, from this run or from quota.json, up to STALE_MAX old.
+//! All of this is per account: a service's own login on this machine and any accounts signed in from the app
+//! window (`quota::login`), each with its own id.
 use crate::anim::Fades;
 use crate::i18n::{self, Lang};
-use crate::model::{now_ms, NetState, QErr, Quota, Retry, Snapshot, Svc, SERVICES};
+use crate::model::{aid, now_ms, short_who, Aid, NetState, QErr, Quota, Retry, Snapshot, Svc};
+use crate::quota::login;
 use crate::settings::{CardPos, Settings};
+use std::collections::{HashMap, HashSet};
 use crate::ui::app_window::{self, AppWin, Action as AppAction};
 use crate::ui::card::{self, CardFx, CardIn, Target};
 use crate::ui::gfx::Canvas;
@@ -26,6 +30,17 @@ use tiny_skia::Pixmap;
 
 const POLL: Duration = Duration::from_secs(60);
 const IDLE_POLL: Duration = Duration::from_secs(5 * 60);
+/// Claude's usage answers "too many requests" after a few checks a minute apart, and Copilot's quota is monthly:
+/// those are checked this often (a refresh by hand still checks them at once).
+const SLOW_POLL: Duration = Duration::from_secs(5 * 60);
+
+/// How often an account of `s` is checked while the overlay is on screen.
+fn every(s: Svc) -> Duration {
+    match s {
+        Svc::Claude | Svc::Copilot => SLOW_POLL,
+        Svc::Codex | Svc::Cursor => POLL,
+    }
+}
 const MIN_REFRESH_GAP: Duration = Duration::from_secs(10);
 const BACKOFF_MS: i64 = 2 * 60 * 1000;
 const MAX_BACKOFF_MS: i64 = 15 * 60 * 1000;
@@ -69,7 +84,6 @@ impl RectD {
     pub fn new(x: f64, y: f64, w: f64, h: f64) -> Self {
         Self { x, y, w, h }
     }
-    #[allow(dead_code)] // macOS / Linux
     pub fn contains(&self, x: f64, y: f64) -> bool {
         x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
     }
@@ -177,6 +191,8 @@ pub trait Host {
     fn login_item(&self) -> Option<bool>;
     fn set_login_item(&mut self, on: bool);
     fn open_url(&mut self, url: &str);
+    /// Puts `text` on the clipboard.
+    fn copy_text(&mut self, text: &str);
     fn quit(&mut self);
     fn relaunch(&mut self);
     /// The next `Ev::Timer` comes after `after` (replacing any earlier request).
@@ -187,9 +203,12 @@ pub enum Msg {
     Quota(Snapshot),
     Net(bool, u64),
     Update(UpMsg),
+    /// News from sign-in number `n`.
+    Login(u64, Svc, login::Event),
 }
 
-pub type Fetcher = fn([bool; 3]) -> Snapshot;
+/// Checks every account except the ids given.
+pub type Fetcher = fn(&HashSet<String>) -> Snapshot;
 
 /// A service left alone after "too many requests": until when (unix ms), the current back-off, and the server's
 /// own Retry-After (0 = none), which a manual retry doesn't skip.
@@ -203,6 +222,13 @@ struct Cool {
 /// An error the user has to fix (log in again): shown as is, never hidden behind old numbers.
 fn needs_login(e: &QErr) -> bool {
     e.code.ends_with("Expired") || e.code.ends_with("ExpiredKeychain")
+}
+
+/// The line under the app window's Services heading after a sign-in: what happened, and whether it went wrong.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Note {
+    pub text: String,
+    pub bad: bool,
 }
 
 struct Drag {
@@ -224,9 +250,23 @@ pub struct App {
     last: Option<Snapshot>,
     last_fetch: Option<Instant>,
     refreshing: bool,
-    cooling: [Option<Cool>; 3],
-    /// Each service's last good numbers (`as_of` = when fetched), also kept in quota.json.
-    good: [Option<Quota>; 3],
+    /// Check again as soon as the check under way is back (an account was just signed in).
+    refresh_again: bool,
+    /// When each account was last checked; the ones left out of the check under way as not due yet (`every`) keep
+    /// their numbers; the next check takes every account (a refresh by hand, waking up).
+    checked: HashMap<String, Instant>,
+    resting: HashSet<String>,
+    check_all: bool,
+    /// By account id.
+    cooling: HashMap<String, Cool>,
+    /// Each account's last good numbers (`as_of` = when fetched), also kept in quota.json.
+    good: crate::cache::Good,
+    /// The sign-in under way (one at a time) and its number; the line it left in the app window.
+    login: Option<login::Pending>,
+    login_n: u64,
+    /// The code to type on the sign-in page, once it came (GitHub).
+    login_code: Option<String>,
+    note: Option<Note>,
     net_busy: bool,
     net: Option<NetState>,
     next_net: Instant,
@@ -237,14 +277,13 @@ pub struct App {
     card_size: (f64, f64),
     panel_size: (f64, f64),
     toast_size: (f64, f64),
-    selected: Option<(Svc, i32)>,
+    selected: Option<(Aid, i32)>,
     anchor_right: bool,
     anchor_bottom: bool,
     drag: Option<Drag>,
     visible: bool,
     panel_shown: bool,
     toast_shown: bool,
-    loading: bool,
 
     // animation
     card_hover: Fades<Target>,
@@ -256,6 +295,8 @@ pub struct App {
     toast_t0: Instant,
     toast_bar: f32,
     last_frame: Instant,
+    /// When the app window was last painted (changed parts are painted at most once a frame).
+    app_painted: Instant,
     started: Instant,
     hover_card: Option<Target>,
     hover_panel: bool,
@@ -271,8 +312,10 @@ pub struct App {
     app_win: Option<AppWin>,
     /// The app window as last painted (partial repaints draw into it) and its device px per DIP.
     app_pm: Option<(Pixmap, f64)>,
-    /// Whether the app starts with the system (read when the app window opens, not every frame).
+    /// Whether the app starts with the system (read when the app window opens, not every frame), and whether the
+    /// last change to it didn't take.
     startup: Option<bool>,
+    startup_failed: bool,
     /// A change that is saved a moment later (the opacity slider moves many times a second).
     save_at: Option<Instant>,
     quitting: bool,
@@ -295,8 +338,16 @@ impl App {
             last: None,
             last_fetch: None,
             refreshing: false,
-            cooling: [None; 3],
+            refresh_again: false,
+            checked: HashMap::new(),
+            resting: HashSet::new(),
+            check_all: false,
+            cooling: HashMap::new(),
             good: crate::cache::load(),
+            login: None,
+            login_n: 0,
+            login_code: None,
+            note: None,
             net_busy: false,
             net: None,
             next_net: now,
@@ -313,7 +364,6 @@ impl App {
             visible: true,
             panel_shown: false,
             toast_shown: false,
-            loading: false,
             card_hover: Fades::new(0.12),
             card_over: Fades::new(0.15),
             panel_hover: Fades::new(0.12),
@@ -323,6 +373,7 @@ impl App {
             toast_t0: now,
             toast_bar: 0.0,
             last_frame: now,
+            app_painted: now,
             started: now,
             hover_card: None,
             hover_panel: false,
@@ -336,6 +387,7 @@ impl App {
             app_win: None,
             app_pm: None,
             startup: None,
+            startup_failed: false,
             save_at: None,
             quitting: false,
         }
@@ -508,12 +560,31 @@ impl App {
                     self.updater.on_msg(u);
                     self.on_update_change();
                 }
+                Msg::Login(n, _, login::Event::Code(code)) => {
+                    // Ready to paste on the page that is already open.
+                    if n == self.login_n && self.login.is_some() {
+                        h.copy_text(&code);
+                        self.login_code = Some(code);
+                        if let Some(a) = &mut self.app_win {
+                            a.dirty = true;
+                        }
+                    }
+                }
+                Msg::Login(n, svc, login::Event::Done(o)) => self.on_login(n, svc, o),
             }
         }
     }
 
     fn tick(&mut self, h: &mut dyn Host) {
         let now = Instant::now();
+        // A pointer that left without the system saying so (the card moved or hid under a still pointer) must not
+        // leave the card lit.
+        if self.hover_card.is_some() && self.drag.is_none() {
+            let (x, y) = h.cursor();
+            if !self.visible || !self.around(self.card, self.card_size).contains(x, y) {
+                self.set_card_hover(h, None);
+            }
+        }
         // Polling: due once POLL (on screen) or IDLE_POLL (all hidden) has passed since the last check.
         let gap = if self.on_screen(h) { POLL } else { IDLE_POLL };
         if self.last_fetch.is_none_or(|t| now.duration_since(t) + Duration::from_secs(1) >= gap) {
@@ -532,6 +603,7 @@ impl App {
         }
         if self.resume_at.is_some_and(|t| now >= t) {
             self.resume_at = None;
+            self.check_all = true;
             self.refresh(true);
             self.check_network();
             self.updater.check_if_stale(Duration::ZERO);
@@ -571,30 +643,46 @@ impl App {
             return;
         }
         self.refreshing = true;
-        self.loading = true;
-        self.dirty_card = true;
-        self.last_fetch = Some(Instant::now());
+        let at = Instant::now();
+        self.last_fetch = Some(at);
         let now = now_ms();
-        let mut enabled = self.settings.services;
-        for s in SERVICES {
-            if self.cooling[s.index()].is_some_and(|c| c.until > now) {
-                enabled[s.index()] = false;
+        let mut skip: HashSet<String> = self.settings.services.iter().filter(|(_, on)| !**on).map(|(id, _)| id.clone()).collect();
+        skip.extend(self.cooling.iter().filter(|(_, c)| c.until > now).map(|(id, _)| id.clone()));
+        // Accounts checked less often (`every`) sit this one out until they are due.
+        self.resting.clear();
+        if !std::mem::take(&mut self.check_all) {
+            for (a, _) in self.last.iter().flat_map(|l| &l.accts) {
+                let due = self.checked.get(&a.id).is_none_or(|t| at.duration_since(*t) + Duration::from_secs(2) >= every(a.svc));
+                if !due && !skip.contains(&a.id) {
+                    self.resting.insert(a.id.clone());
+                }
             }
         }
+        skip.extend(self.resting.iter().cloned());
         let fetch = self.fetcher;
         let (tx, waker) = (self.tx.clone(), self.waker.clone());
         std::thread::spawn(move || {
-            let snap = fetch(enabled);
+            let snap = fetch(&skip);
             let _ = tx.send(Msg::Quota(snap));
             waker();
         });
     }
 
-    /// A double-click on the card or "Refresh now": also tries services that are waiting out a "too many requests",
+    /// Checks now, or right after the check under way (which may have started before what changed).
+    fn refresh_soon(&mut self) {
+        if self.refreshing {
+            self.refresh_again = true;
+        } else {
+            self.refresh(true);
+        }
+    }
+
+    /// A double-click on the card or "Refresh now": also tries accounts that are waiting out a "too many requests",
     /// except while the server's own Retry-After holds.
     fn retry_now(&mut self) {
+        self.check_all = true;
         let now = now_ms();
-        for c in self.cooling.iter_mut().flatten() {
+        for c in self.cooling.values_mut() {
             if c.server <= now && c.until > now {
                 c.until = now - 1;
             }
@@ -602,15 +690,15 @@ impl App {
         self.refresh(false);
     }
 
-    fn retry_of(&self, i: usize, now: i64) -> Option<Retry> {
-        self.cooling[i].map(|c| Retry { at: c.until, manual: c.server <= now })
+    fn retry_of(&self, id: &str, now: i64) -> Option<Retry> {
+        self.cooling.get(id).map(|c| Retry { at: c.until, manual: c.server <= now })
     }
 
-    /// What to show for a service whose check failed with `err`: its last good numbers (if not too old and the
+    /// What to show for an account whose check failed with `err`: its last good numbers (if not too old and the
     /// login is fine) carrying the error, else the error alone.
-    fn failed(&self, i: usize, err: QErr, now: i64) -> Quota {
-        let retry = self.retry_of(i, now);
-        let good = if needs_login(&err) { None } else { self.good[i].as_ref().and_then(|g| crate::cache::aged(g, now, STALE_MAX_MS)) };
+    fn failed(&self, id: &str, err: QErr, now: i64) -> Quota {
+        let retry = self.retry_of(id, now);
+        let good = if needs_login(&err) { None } else { self.good.get(id).and_then(|g| crate::cache::aged(g, now, STALE_MAX_MS)) };
         match good {
             Some(g) => Quota { error: Some(err), retry, ..g },
             None => Quota { error: Some(err), retry, ..Quota::default() },
@@ -618,46 +706,62 @@ impl App {
     }
 
     fn on_quota(&mut self, h: &mut dyn Host, mut fresh: Snapshot) {
+        // In the order the user has now (a check that started before a drag and drop came back in the old one).
+        let order: Vec<String> = crate::quota::store::list().into_iter().map(|s| s.id).collect();
+        fresh.accts.sort_by_key(|(a, _)| order.iter().position(|id| *id == a.id).unwrap_or(usize::MAX));
         let now = now_ms();
         let started = now - self.last_fetch.map(|t| t.elapsed().as_millis() as i64).unwrap_or(0);
+        let fetched_at = fresh.fetched_at;
         let mut store = false;
-        for s in SERVICES {
-            let i = s.index();
-            if !self.settings.services[i] {
-                self.cooling[i] = None;
+        let checked_at = self.last_fetch.unwrap_or_else(Instant::now);
+        for (a, q) in fresh.accts.iter_mut() {
+            let id = a.id.as_str();
+            if !self.settings.on(id) {
+                self.cooling.remove(id);
                 continue;
             }
-            if self.cooling[i].is_some_and(|c| c.until > started) {
+            if self.resting.contains(id) {
+                // Not due this time: as it was.
+                if let Some(prev) = self.last.as_ref().and_then(|l| l.get(id)) {
+                    *q = prev.clone();
+                }
+                continue;
+            }
+            if !q.disabled {
+                self.checked.insert(id.to_string(), checked_at);
+            }
+            if self.cooling.get(id).is_some_and(|c| c.until > started) {
                 // Not checked this time: keep the last error, with the numbers aged and the next try updated.
-                let err = self.last.as_ref().and_then(|l| l.svc[i].as_ref()).and_then(|q| q.error.clone());
-                fresh.svc[i] = Some(self.failed(i, err.unwrap_or_else(|| QErr::rate_limited(None)), now));
+                let err = self.last.as_ref().and_then(|l| l.get(id)).and_then(|q| q.error.clone());
+                *q = self.failed(id, err.unwrap_or_else(|| QErr::rate_limited(None)), now);
                 continue;
             }
-            let Some(q) = fresh.svc[i].clone() else { continue };
             if q.ok || q.absent {
-                self.cooling[i] = None;
+                self.cooling.remove(id);
                 if q.ok {
-                    self.good[i] = Some(Quota { as_of: Some(fresh.fetched_at), ..q });
+                    self.good.insert(id.to_string(), Quota { as_of: Some(fetched_at), ..q.clone() });
                     store = true;
                 }
                 continue;
             }
             let err = q.error.clone().unwrap_or_default();
             if q.rate_limited() {
-                let ms = (self.cooling[i].map(|c| c.ms).unwrap_or(BACKOFF_MS / 2) * 2).min(MAX_BACKOFF_MS);
+                let ms = (self.cooling.get(id).map(|c| c.ms).unwrap_or(BACKOFF_MS / 2) * 2).min(MAX_BACKOFF_MS);
                 let server = err.retry_at.map_or(0, |t| t.min(started + MAX_SERVER_WAIT_MS));
-                self.cooling[i] = Some(Cool { until: (started + ms).max(server), ms, server });
+                self.cooling.insert(id.to_string(), Cool { until: (started + ms).max(server), ms, server });
             } else {
-                self.cooling[i] = None;
+                self.cooling.remove(id);
             }
-            fresh.svc[i] = Some(self.failed(i, err, now));
+            *q = self.failed(id, err, now);
         }
         if store {
             crate::cache::save(&self.good);
         }
         self.last = Some(fresh);
         self.refreshing = false;
-        self.loading = false;
+        if std::mem::take(&mut self.refresh_again) {
+            self.refresh(true);
+        }
         self.remember_windows();
         self.dirty_card = true;
         self.dirty_panel = self.selected.is_some();
@@ -672,20 +776,19 @@ impl App {
         }
     }
 
-    /// Remember each service's windows, so the app window can still list them while it's switched off or offline.
+    /// Remember each account's windows, so the app window can still list them while it's switched off or offline.
     fn remember_windows(&mut self) {
         let Some(last) = &self.last else { return };
         let mut changed = false;
-        for s in SERVICES {
-            let Some(q) = last.get(s) else { continue };
+        for (a, q) in &last.accts {
             if !q.ok || q.windows.is_empty() {
                 continue;
             }
             let seen: Vec<_> = q.windows.iter().map(|w| w.seen()).collect();
-            if self.settings.seen[s.index()].as_ref() == Some(&seen) {
+            if self.settings.seen.get(&a.id) == Some(&seen) {
                 continue;
             }
-            self.settings.seen[s.index()] = Some(seen);
+            self.settings.seen.insert(a.id.clone(), seen);
             changed = true;
         }
         if changed {
@@ -700,23 +803,23 @@ impl App {
         };
         let lang = self.lang();
         let mut lines = Vec::new();
-        for s in SERVICES {
-            let Some(q) = last.get(s) else { continue };
+        for (a, q) in &last.accts {
             if q.absent {
                 continue;
             }
+            let name = if last.count(a.svc) > 1 && !a.who.is_empty() { format!("{} ({})", a.svc.name(), short_who(&a.who)) } else { a.svc.name().to_string() };
             if !q.ok {
-                lines.push(format!("{}: {}", s.name(), q.error.as_ref().map(|e| i18n::error_text(e, lang)).unwrap_or_default()));
+                lines.push(format!("{name}: {}", q.error.as_ref().map(|e| i18n::error_text(e, lang)).unwrap_or_default()));
                 continue;
             }
-            let hidden = &self.settings.hidden[s.index()];
+            let hidden = self.settings.hidden_of(&a.id);
             let parts: Vec<String> = q
                 .windows
                 .iter()
                 .filter(|w| !hidden.contains(&w.id))
                 .map(|w| format!("{} {}%", i18n::window_label(w, lang, true), crate::ui::js_round(100.0 - w.used())))
                 .collect();
-            let mut line = format!("{} {}", s.name(), parts.join(" · "));
+            let mut line = format!("{name} {}", parts.join(" · "));
             if let Some(at) = q.as_of.filter(|_| q.stale()) {
                 line += &format!(" ({})", crate::fmt::time(at, lang));
             }
@@ -731,12 +834,92 @@ impl App {
         h.tray_tooltip(&cut);
     }
 
-    /// Debug aid: save a PNG of the card after the first fetch, then exit.
+    /// Debug aid: save a PNG of the card after the first fetch, then exit. QUOTA_OVERLAY_SNAPSHOT_APP=<png> also
+    /// saves the app window (at 2×).
     fn snapshot(&mut self, h: &mut dyn Host, path: &str) {
         if let Some(pm) = self.render_card(h) {
             let _ = pm.save_png(path);
         }
+        if let Ok(p) = std::env::var("QUOTA_OVERLAY_SNAPSHOT_APP") {
+            let (w, hh) = (app_window::SIZE.0 as f32, app_window::SIZE.1 as f32);
+            if let Some(mut pm) = Pixmap::new((w * 2.0) as u32, (hh * 2.0) as u32) {
+                let ctx = self.app_ctx();
+                {
+                    let mut c = Canvas::new(&mut pm, 2.0, 0.0, 0.0);
+                    AppWin::new().draw(&mut c, &mut self.fonts, &ctx, w, hh);
+                }
+                let _ = pm.save_png(p);
+            }
+        }
         self.quit(h);
+    }
+
+    // ---------- signing in ----------
+
+    /// Signs in to another account of `svc` in the browser (giving up on any sign-in still under way).
+    fn sign_in(&mut self, h: &mut dyn Host, svc: Svc) {
+        self.login = None;
+        self.login_code = None;
+        self.login_n += 1;
+        let n = self.login_n;
+        let (tx, waker) = (self.tx.clone(), self.waker.clone());
+        match login::start(svc, self.lang(), move |e| {
+            let _ = tx.send(Msg::Login(n, svc, e));
+            waker();
+        }) {
+            Ok(p) => {
+                h.open_url(&p.url);
+                self.login = Some(p);
+                self.note = None;
+            }
+            Err(e) => self.note = Some(Note { text: i18n::login_failed(self.lang(), &e), bad: true }),
+        }
+    }
+
+    fn on_login(&mut self, n: u64, svc: Svc, o: login::Outcome) {
+        let current = n == self.login_n;
+        if current {
+            self.login = None;
+            self.login_code = None;
+        }
+        match o {
+            // Stored whichever sign-in it was: check it.
+            Ok(id) => {
+                let who = crate::quota::store::get(&id).map(|s| s.email).unwrap_or_default();
+                self.note = Some(Note { text: i18n::signed_in(self.lang(), svc.name(), &who), bad: false });
+                self.cooling.remove(&id);
+                if self.settings.services.remove(&id).is_some() {
+                    self.save();
+                }
+                self.refresh_soon();
+            }
+            Err(Some(e)) if current => self.note = Some(Note { text: i18n::login_failed(self.lang(), &e), bad: true }),
+            Err(_) => {}
+        }
+        if let Some(a) = &mut self.app_win {
+            a.dirty = true;
+        }
+    }
+
+    /// Forgets an account: its tokens, settings and numbers.
+    fn sign_out(&mut self, h: &mut dyn Host, id: &str) {
+        let _ = crate::quota::store::remove(id);
+        self.settings.forget(id);
+        if let Some(l) = &mut self.last {
+            l.accts.retain(|(a, _)| a.id != id);
+        }
+        self.save();
+        if self.good.remove(id).is_some() {
+            crate::cache::save(&self.good);
+        }
+        self.cooling.remove(id);
+        self.checked.remove(id);
+        if self.selected.is_some_and(|(x, _)| x == aid(id)) {
+            self.select(None);
+        }
+        self.note = None;
+        self.dirty_card = true;
+        self.update_tooltip(h);
     }
 
     // ---------- internet ----------
@@ -783,6 +966,7 @@ impl App {
             a.damage_net();
         }
         if online && was_offline {
+            self.check_all = true;
             self.refresh(true);
         }
     }
@@ -801,7 +985,7 @@ impl App {
     // ---------- selection, visibility ----------
 
     /// Opening a ring's panel: lay it out, move the window there, then reveal it, so it never shows at its old spot.
-    fn select(&mut self, next: Option<(Svc, i32)>) {
+    fn select(&mut self, next: Option<(Aid, i32)>) {
         self.selected = next;
         self.dirty_card = true;
         self.dirty_toast = true;
@@ -820,6 +1004,10 @@ impl App {
         if !self.visible {
             self.select(None);
             h.hide(WinKind::Card);
+            // Hidden under the pointer (the shortcut): it comes back unlit.
+            self.set_card_hover(h, None);
+            self.card_hover.snap();
+            self.card_over.snap();
         }
         self.dirty_card = true;
         self.dirty_toast = true;
@@ -899,7 +1087,7 @@ impl App {
                     self.dirty_toast = true;
                     self.place_all(h);
                     self.set_card_hover(h, hit);
-                } else if d.target == Some(Target::More) {
+                } else if matches!(d.target, Some(Target::More | Target::Prompt)) {
                     self.open_settings(h);
                 } else {
                     let next = match d.target {
@@ -911,7 +1099,7 @@ impl App {
                 }
             }
             Mouse::Dbl(Btn3::Left) => {
-                if !matches!(hit, Some(Target::Ring(..)) | Some(Target::More)) {
+                if !matches!(hit, Some(Target::Ring(..) | Target::More | Target::Prompt)) {
                     self.retry_now();
                 }
             }
@@ -929,7 +1117,7 @@ impl App {
         }
         h.set_cursor(match (self.drag.as_ref().is_some_and(|d| d.moving), hit) {
             (true, _) => CursorKind::Grabbing,
-            (_, Some(Target::Ring(..)) | Some(Target::More)) => CursorKind::Pointer,
+            (_, Some(Target::Ring(..) | Target::More | Target::Prompt)) => CursorKind::Pointer,
             (_, Some(_)) => CursorKind::Grab,
             _ => CursorKind::Default,
         });
@@ -1075,10 +1263,14 @@ impl App {
             settings: self.settings.clone(),
             visible: self.visible,
             startup: self.startup,
+            startup_failed: self.startup_failed,
             data: self.last.clone(),
             net: if self.settings.network { self.net } else { None },
             update: self.updater.view(self.settings.skip_version.as_deref()),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            login: self.login.as_ref().map(|p| p.svc),
+            login_code: self.login_code.clone(),
+            note: self.note.clone(),
         }
     }
 
@@ -1139,19 +1331,60 @@ impl App {
             AppAction::Startup(on) => {
                 h.set_login_item(on);
                 self.startup = h.login_item();
+                // Read back: a blocked write leaves it as it was, which the app window then says.
+                self.startup_failed = self.startup != Some(on);
             }
-            AppAction::Service(s, on) => {
-                self.settings.services[s.index()] = on;
-                if self.selected.is_some_and(|(x, _)| x == s) {
+            AppAction::Service(id, on) => {
+                if on {
+                    self.settings.services.remove(&id);
+                } else {
+                    self.settings.services.insert(id.clone(), false);
+                }
+                if self.selected.is_some_and(|(x, _)| x == aid(&id)) {
                     self.select(None);
                 }
                 self.refresh(true);
             }
-            AppAction::Window(s, id, on) => {
-                let hidden = &mut self.settings.hidden[s.index()];
-                hidden.retain(|x| *x != id);
+            AppAction::Window(id, win, on) => {
+                let hidden = self.settings.hidden.entry(id).or_default();
+                hidden.retain(|x| *x != win);
                 if !on {
-                    hidden.push(id);
+                    hidden.push(win);
+                }
+            }
+            AppAction::SignIn(svc) => {
+                self.sign_in(h, svc);
+                if let Some(a) = &mut self.app_win {
+                    a.dirty = true;
+                }
+                return;
+            }
+            AppAction::CancelSignIn => {
+                self.login = None;
+                self.login_code = None;
+                if let Some(a) = &mut self.app_win {
+                    a.dirty = true;
+                }
+                return;
+            }
+            AppAction::CopyLink => {
+                // The code where there is one (the page needs it), else the page's address.
+                if let Some(p) = &self.login {
+                    h.copy_text(self.login_code.as_deref().unwrap_or(&p.url));
+                }
+                return;
+            }
+            AppAction::SignOut(id) => {
+                self.sign_out(h, &id);
+            }
+            AppAction::MoveTo(id, to) => {
+                let _ = crate::quota::store::move_to(&id, to);
+                // The card and the list follow at once, not at the next check.
+                if let Some(l) = &mut self.last {
+                    if let Some(i) = l.accts.iter().position(|(a, _)| a.id == id) {
+                        let item = l.accts.remove(i);
+                        l.accts.insert(to.min(l.accts.len()), item);
+                    }
                 }
             }
             AppAction::Refresh => {
@@ -1181,13 +1414,12 @@ impl App {
 
     // ---------- drawing ----------
 
-    fn card_in<'a>(settings: &'a Settings, last: &'a Option<Snapshot>, net: Option<NetState>, selected: Option<(Svc, i32)>) -> CardIn<'a> {
+    fn card_in<'a>(settings: &'a Settings, last: &'a Option<Snapshot>, net: Option<NetState>, selected: Option<(Aid, i32)>) -> CardIn<'a> {
         CardIn {
             lang: Lang::from_key(&settings.lang).unwrap_or(Lang::En),
             vertical: settings.vertical,
             network_on: settings.network,
-            services_on: settings.services,
-            hidden: [&settings.hidden[0], &settings.hidden[1], &settings.hidden[2]],
+            settings,
             data: last.as_ref(),
             net,
             selected,
@@ -1229,12 +1461,7 @@ impl App {
         let (scale, pw, ph) = h.device_size(WinKind::Card, r);
         let zoom = self.zoom();
         let mut pm = Pixmap::new(pw.max(1), ph.max(1))?;
-        let fx = CardFx {
-            hover: self.card_hover.map(),
-            card_hover: self.card_over.get(0),
-            loading: self.loading,
-            alarm_s: self.started.elapsed().as_secs_f32(),
-        };
+        let fx = CardFx { hover: self.card_hover.map(), card_hover: self.card_over.get(0), alarm_s: self.started.elapsed().as_secs_f32() };
         {
             let inp = Self::card_in(&self.settings, &self.last, self.net, self.selected);
             let mut c = Canvas::new(&mut pm, (scale * zoom) as f32, PAD_CSS as f32, PAD_CSS as f32);
@@ -1265,6 +1492,8 @@ impl App {
         let dt = gap.as_secs_f32().min(0.1);
         self.last_frame = now;
         let mut painted: Option<&'static str> = None;
+        // A changed part of the app window waiting for its frame.
+        let mut app_due: Option<Instant> = None;
         let mut animating = false;
         if self.card_hover.step(dt) | self.card_over.step(dt) {
             animating = true;
@@ -1340,7 +1569,13 @@ impl App {
                 if aw.step(dt) {
                     animating = true;
                 }
-                if aw.dirty || aw.damage.is_some() {
+                // A changed part is painted at most once a frame: the mouse can send several moves per frame (a
+                // card being dragged), and painting each of them only falls behind. What changed meanwhile adds up.
+                let frame_due = now.duration_since(self.app_painted) >= FRAME - Duration::from_millis(2);
+                if aw.damage.is_some() && !aw.dirty && !frame_due {
+                    app_due = Some(self.app_painted + FRAME);
+                } else if aw.dirty || aw.damage.is_some() {
+                    self.app_painted = now;
                     if let Some((w, hh, scale)) = h.app_size() {
                         let pw = (w * scale).round().max(1.0) as u32;
                         let ph = (hh * scale).round().max(1.0) as u32;
@@ -1375,7 +1610,7 @@ impl App {
                                     {
                                         let mut c = Canvas::new(&mut part, s, 0.0, 0.0);
                                         c.base = c.base.post_translate((M as i32 - x0) as f32, (M as i32 - y0) as f32);
-                                        aw.draw(&mut c, &mut self.fonts, &ctx, w as f32, hh as f32);
+                                        aw.draw_part(&mut c, &mut self.fonts, &ctx, w as f32, hh as f32);
                                     }
                                     copy_into(pm, &part, (M, M, bw, bh), x0 as u32, y0 as u32);
                                     h.app_present_rect(pm, (x0 as u32, y0 as u32, bw, bh));
@@ -1405,6 +1640,9 @@ impl App {
             }
         };
         min_at(self.next_relabel);
+        if let Some(t) = app_due {
+            min_at(t);
+        }
         if self.settings.network && self.visible {
             min_at(self.next_net);
         }
@@ -1426,7 +1664,7 @@ impl App {
 
     /// Draws or hides the panel; true while its pop animation runs.
     fn draw_panel(&mut self, h: &mut dyn Host) -> bool {
-        let Some((svc, index)) = self.selected else {
+        let Some((x, index)) = self.selected else {
             if self.panel_shown {
                 self.panel_shown = false;
                 h.hide(WinKind::Panel);
@@ -1434,9 +1672,10 @@ impl App {
             self.panel_pop = None;
             return false;
         };
-        let Some(q) = self.last.as_ref().and_then(|l| l.get(svc)).cloned() else { return false };
+        let Some((acct, q)) = self.last.as_ref().and_then(|l| l.by_aid(x)).cloned() else { return false };
+        let several = self.last.as_ref().is_some_and(|l| l.count(acct.svc) > 1);
         let lang = self.lang();
-        let inp = PanelIn { lang, svc, q: &q, index, now: now_ms() };
+        let inp = PanelIn { lang, svc: acct.svc, who: (several && !acct.who.is_empty()).then_some(acct.who.as_str()), q: &q, index, now: now_ms() };
         let l = panel::layout(&mut self.fonts, &inp);
         let size = ((panel::W as f64 * self.zoom()).ceil(), (l.h as f64 * self.zoom()).ceil());
         self.panel_size = size;

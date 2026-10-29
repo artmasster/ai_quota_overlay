@@ -1,7 +1,9 @@
 //! settings.json in the same folder and shape the Electron app used (`app.getPath('userData')`), so existing
 //! users keep their settings: card, opacity, vertical, lang, network, services, hidden, seen, skipVersion.
-//! 2.x adds `size` (small / medium / large overlay).
-use crate::model::{Svc, Win, SERVICES};
+//! 2.x adds `size` (small / medium / large overlay). Since accounts are signed in here, `services`, `hidden` and
+//! `seen` are keyed by account id ("claude-3f9a2c"); the bare service keys older versions wrote (for the logins
+//! other apps keep, no longer used) are dropped on load.
+use crate::model::{Svc, Win};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -29,11 +31,12 @@ pub struct Settings {
     pub size: String,
     pub lang: String,
     pub network: bool,
-    pub services: [bool; 3],
-    /// Window ids left off the card, per service.
-    pub hidden: [Vec<String>; 3],
-    /// The windows each service had last time (shown in the app window while it is off).
-    pub seen: [Option<Vec<Win>>; 3],
+    /// Accounts switched off (false) or on; not listed = on.
+    pub services: BTreeMap<String, bool>,
+    /// Window ids left off the card, per account.
+    pub hidden: BTreeMap<String, Vec<String>>,
+    /// The windows each account had last time (shown in the app window while it is off).
+    pub seen: BTreeMap<String, Vec<Win>>,
     pub skip_version: Option<String>,
     /// Keys this version doesn't know, written back unchanged.
     pub other: Map<String, Value>,
@@ -48,7 +51,7 @@ impl Default for Settings {
             size: "medium".into(),
             lang: "en".into(),
             network: false,
-            services: [true; 3],
+            services: BTreeMap::new(),
             hidden: Default::default(),
             seen: Default::default(),
             skip_version: None,
@@ -92,6 +95,23 @@ impl Settings {
         SIZES.iter().find(|(k, _)| *k == self.size).map_or(1.2, |(_, z)| *z)
     }
 
+    /// Whether account `id` is switched on.
+    pub fn on(&self, id: &str) -> bool {
+        self.services.get(id).copied().unwrap_or(true)
+    }
+
+    /// The window ids of account `id` left off the card.
+    pub fn hidden_of(&self, id: &str) -> &[String] {
+        self.hidden.get(id).map_or(&[], Vec::as_slice)
+    }
+
+    /// Drops what was kept for an account that was signed out.
+    pub fn forget(&mut self, id: &str) {
+        self.services.remove(id);
+        self.hidden.remove(id);
+        self.seen.remove(id);
+    }
+
     pub fn load() -> Self {
         Self::parse(&std::fs::read_to_string(file()).unwrap_or_default())
     }
@@ -124,27 +144,30 @@ impl Settings {
         if let Some(v) = m.remove("network").and_then(|v| v.as_bool()) {
             s.network = v;
         }
+        // Per account; a bare service key is an older version's entry for another app's login.
+        let account = |id: &str| Svc::from_key(id).is_none();
         if let Some(Value::Object(sv)) = m.remove("services") {
-            for svc in SERVICES {
-                if let Some(b) = sv.get(svc.key()).and_then(|v| v.as_bool()) {
-                    s.services[svc.index()] = b;
+            for (id, v) in sv {
+                if let (true, Some(b)) = (account(&id), v.as_bool()) {
+                    s.services.insert(id, b);
                 }
             }
         }
         if let Some(Value::Object(h)) = m.remove("hidden") {
-            for svc in SERVICES {
-                if let Some(Value::Array(a)) = h.get(svc.key()) {
-                    s.hidden[svc.index()] = a.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+            for (id, v) in h {
+                if let (true, Value::Array(a)) = (account(&id), v) {
+                    s.hidden.insert(id, a.iter().filter_map(|v| v.as_str().map(String::from)).collect());
                 }
             }
         }
         if let Some(Value::Object(seen)) = m.remove("seen") {
-            for svc in SERVICES {
-                if let Some(v) = seen.get(svc.key()) {
-                    s.seen[svc.index()] = serde_json::from_value(v.clone()).ok();
+            for (id, v) in seen {
+                if let (true, Ok(w)) = (account(&id), serde_json::from_value(v)) {
+                    s.seen.insert(id, w);
                 }
             }
         }
+        m.remove("removed");
         if let Some(v) = m.remove("skipVersion") {
             s.skip_version = v.as_str().map(String::from);
         }
@@ -159,21 +182,11 @@ impl Settings {
         m.insert("vertical".into(), Value::from(self.vertical));
         m.insert("lang".into(), Value::from(self.lang.clone()));
         m.insert("network".into(), Value::from(self.network));
-        let per = |f: &dyn Fn(Svc) -> Value| -> Value {
-            let mut o = Map::new();
-            for svc in SERVICES {
-                o.insert(svc.key().into(), f(svc));
-            }
-            Value::Object(o)
-        };
-        m.insert("services".into(), per(&|s| Value::from(self.services[s.index()])));
-        m.insert("hidden".into(), per(&|s| Value::from(self.hidden[s.index()].clone())));
-        let mut seen = Map::new();
-        for svc in SERVICES {
-            if let Some(w) = &self.seen[svc.index()] {
-                seen.insert(svc.key().into(), serde_json::to_value(w).unwrap_or(Value::Null));
-            }
-        }
+        let services: Map<String, Value> = self.services.iter().map(|(id, on)| (id.clone(), Value::from(*on))).collect();
+        let hidden: Map<String, Value> = self.hidden.iter().map(|(id, h)| (id.clone(), Value::from(h.clone()))).collect();
+        let seen: Map<String, Value> = self.seen.iter().map(|(id, w)| (id.clone(), serde_json::to_value(w).unwrap_or(Value::Null))).collect();
+        m.insert("services".into(), Value::Object(services));
+        m.insert("hidden".into(), Value::Object(hidden));
         m.insert("seen".into(), Value::Object(seen));
         m.insert("skipVersion".into(), self.skip_version.clone().map(Value::from).unwrap_or(Value::Null));
         // Keys added after Electron come after its own.
@@ -216,15 +229,12 @@ mod tests {
         let s = Settings::parse(raw);
         assert_eq!(s.card.unwrap().x, 2271.6);
         assert_eq!(s.lang, "th");
-        assert!(!s.services[1]);
-        assert_eq!(s.hidden[0], vec!["seven_day_opus".to_string()]);
-        assert_eq!(s.seen[0].as_ref().unwrap()[1].name.as_deref(), Some("Opus"));
-        assert!(s.seen[2].as_ref().unwrap()[0].billing);
         assert_eq!(s.skip_version.as_deref(), Some("1.3.0"));
+        // The other apps' logins' entries are gone.
+        assert!(s.services.is_empty() && s.hidden.is_empty() && s.seen.is_empty());
         let out = s.to_json();
         assert_eq!(out["futureKey"], 42);
-        assert_eq!(out["seen"]["claude"][0], serde_json::json!({"id": "five_hour", "span": 18000}));
-        assert_eq!(out["services"]["codex"], false);
+        assert_eq!(out["services"], serde_json::json!({}));
         // JSON.stringify order: the known keys first, as Electron wrote them.
         let text = serde_json::to_string(&out).unwrap();
         assert!(text.starts_with(r#"{"card":{"x":2271.6,"y":1265.0,"w":296.0,"h":97.0},"opacity":0.85,"vertical":true,"lang":"th""#), "{text}");
@@ -236,8 +246,23 @@ mod tests {
         assert_eq!(s.card.unwrap().h, Some(356.0));
         assert!(s.vertical);
         assert_eq!(s.lang, "en");
-        assert_eq!(s.services, [true; 3]);
+        assert!(s.on("claude-1a2b3c"));
+        assert_eq!(s.to_json()["hidden"], serde_json::json!({}));
         assert_eq!(Settings::parse("not json"), Settings::default());
         assert_eq!(Settings::parse(r#"{"lang":"fr"}"#).lang, "en");
+    }
+
+    #[test]
+    fn accounts_signed_in_here_have_their_own_keys() {
+        let mut s = Settings::parse(r#"{"services":{"claude-1a2b3c":false,"claude":true},"hidden":{"claude-1a2b3c":["five_hour"]},
+            "seen":{"claude-1a2b3c":[{"id":"five_hour","span":18000,"name":"x"}]},"removed":["cursor"]}"#);
+        assert!(!s.on("claude-1a2b3c"));
+        assert_eq!(s.hidden_of("claude-1a2b3c"), ["five_hour".to_string()]);
+        assert_eq!(s.seen["claude-1a2b3c"][0].name.as_deref(), Some("x"));
+        let text = serde_json::to_string(&s.to_json()).unwrap();
+        assert!(text.contains(r#""services":{"claude-1a2b3c":false},"hidden":{"claude-1a2b3c":["five_hour"]}"#), "{text}");
+        assert!(!text.contains("removed"), "{text}");
+        s.forget("claude-1a2b3c");
+        assert!(s.on("claude-1a2b3c") && s.hidden_of("claude-1a2b3c").is_empty() && s.seen.is_empty());
     }
 }

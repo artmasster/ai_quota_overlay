@@ -1,24 +1,32 @@
-//! Fetches remaining quota for Claude (claude.ai subscription), Codex (ChatGPT plan) and Cursor.
-//! Credentials are read from where the official apps already keep them; nothing is stored elsewhere.
-//! Port of the Electron app's `src/quota.js`.
+//! Fetches remaining quota for Claude (claude.ai subscription), Codex (ChatGPT plan) and Cursor, per account: the
+//! accounts signed in from this app (`login`, kept in accounts.json by `store`), any number per service. Logins
+//! that other apps keep on this machine are not used.
 #![allow(dead_code)]
 
 mod claude;
 mod codex;
+mod copilot;
 mod cursor;
+pub mod login;
+pub mod store;
 
+use std::collections::HashSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, URL_SAFE_NO_PAD};
+use base64::engine::DecodePaddingMode;
+use base64::Engine;
 use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
 use serde_json::Value;
 
 use crate::http::HttpErr;
-use crate::model::{now_ms, QErr, Quota, Snapshot, Svc, SERVICES};
+use crate::model::{now_ms, Acct, QErr, Quota, Snapshot, Svc};
 
 /// Why a fetcher did not produce data; mapped onto a [`Quota`] by [`settle`] like JS `settle()`.
 #[derive(Debug, PartialEq)]
 pub(crate) enum FetchErr {
-    /// No login for this service on this machine at all; the overlay hides it.
+    /// The account is gone (signed out meanwhile); the overlay hides it.
     NotLoggedIn,
     /// The request could not be made (JS: "fetch failed").
     Offline,
@@ -55,6 +63,21 @@ pub(crate) fn qerr(code: &str) -> FetchErr {
     FetchErr::Quota(QErr::code(code))
 }
 
+/// An account signed in here whose login no longer works: it has to be signed in again from the app window.
+pub(crate) fn app_expired(service: &str, status: Option<String>) -> FetchErr {
+    FetchErr::Quota(QErr { code: "appExpired".into(), service: Some(service.into()), status, ..QErr::default() })
+}
+
+/// What `FetchErr` says, for a sign-in that failed.
+pub(crate) fn describe(e: &FetchErr, lang: crate::i18n::Lang) -> String {
+    match e {
+        FetchErr::NotLoggedIn => "no login".into(),
+        FetchErr::Offline => crate::i18n::error_text(&QErr::code("offline"), lang),
+        FetchErr::Quota(q) => crate::i18n::error_text(q, lang),
+        FetchErr::Unexpected(m) => m.clone(),
+    }
+}
+
 pub(crate) fn settle(r: Res<Quota>) -> Quota {
     match r {
         Ok(q) => Quota { ok: true, ..q },
@@ -63,38 +86,6 @@ pub(crate) fn settle(r: Res<Quota>) -> Quota {
         Err(FetchErr::Quota(e)) => Quota::err(e),
         Err(FetchErr::Unexpected(m)) => Quota::err(QErr { code: "unexpected".into(), message: Some(m), ..QErr::default() }),
     }
-}
-
-// ---------------------------------------------------------------------------------------------------------
-// Where the official apps keep their logins.
-
-pub(crate) fn home() -> PathBuf {
-    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    std::env::var_os(var).map(PathBuf::from).unwrap_or_default()
-}
-
-/// `$var` when set (even empty, like JS `??`), else `default`.
-fn env_dir(var: &str, default: impl FnOnce() -> PathBuf) -> PathBuf {
-    std::env::var_os(var).map(PathBuf::from).unwrap_or_else(default)
-}
-
-pub(crate) fn claude_creds_path() -> PathBuf {
-    env_dir("CLAUDE_CONFIG_DIR", || home().join(".claude")).join(".credentials.json")
-}
-
-pub(crate) fn codex_auth_path() -> PathBuf {
-    env_dir("CODEX_HOME", || home().join(".codex")).join("auth.json")
-}
-
-pub(crate) fn cursor_db_path() -> PathBuf {
-    let base = if cfg!(windows) {
-        env_dir("APPDATA", || home().join("AppData").join("Roaming"))
-    } else if cfg!(target_os = "macos") {
-        home().join("Library").join("Application Support")
-    } else {
-        env_dir("XDG_CONFIG_HOME", || home().join(".config"))
-    };
-    base.join("Cursor").join("User").join("globalStorage").join("state.vscdb")
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -189,8 +180,90 @@ pub(crate) fn entry<'a>(entries: &'a [(String, Value)], key: &str) -> Option<&'a
     entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
 
-pub(crate) fn read_json(file: &Path) -> Res<Value> {
-    Ok(serde_json::from_slice(&std::fs::read(file)?)?)
+pub(crate) fn tmp_path(file: &Path) -> PathBuf {
+    let mut s = file.as_os_str().to_owned();
+    s.push(".quota-overlay.tmp");
+    PathBuf::from(s)
+}
+
+/// Writes `<file>.quota-overlay.tmp` (mode 0600 on unix) and renames it over `file`.
+pub(crate) fn write_json_atomic(file: &Path, data: &Value) -> std::io::Result<()> {
+    let tmp = tmp_path(file);
+    let result = (|| {
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            o.mode(0o600);
+        }
+        let mut f = o.open(&tmp)?;
+        f.write_all(&serde_json::to_vec(data)?)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, file)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// `n` bytes from the system's random source.
+pub(crate) fn random(n: usize) -> Vec<u8> {
+    let mut b = vec![0u8; n];
+    getrandom::getrandom(&mut b).expect("system random source");
+    b
+}
+
+pub(crate) fn b64url(b: &[u8]) -> String {
+    URL_SAFE_NO_PAD.encode(b)
+}
+
+/// The JSON payload of a JWT (base64url, padding optional, like Node's `base64url` decoding).
+pub(crate) fn jwt_payload(token: &str) -> Option<Value> {
+    const ENGINE: GeneralPurpose = GeneralPurpose::new(
+        &base64::alphabet::URL_SAFE,
+        GeneralPurposeConfig::new()
+            .with_encode_padding(false)
+            .with_decode_padding_mode(DecodePaddingMode::Indifferent)
+            .with_decode_allow_trailing_bits(true),
+    );
+    let part = token.split('.').nth(1)?;
+    let cleaned: String = part
+        .chars()
+        .filter_map(|c| match c {
+            '+' => Some('-'),
+            '/' => Some('_'),
+            c if c.is_ascii_alphanumeric() || c == '-' || c == '_' => Some(c),
+            _ => None,
+        })
+        .collect();
+    let bytes = ENGINE.decode(cleaned).ok()?;
+    serde_json::from_str(&String::from_utf8_lossy(&bytes)).ok()
+}
+
+/// A JWT's `exp` in unix ms (0 when it has none).
+pub(crate) fn jwt_exp_ms(token: &str) -> i64 {
+    jwt_payload(token).and_then(|p| js_number(p.get("exp"))).map_or(0, |e| (e * 1000.0) as i64)
+}
+
+/// JS `encodeURIComponent`.
+pub(crate) fn encode_uri_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// `a=1&b=2` with each value percent-encoded.
+pub(crate) fn query(pairs: &[(&str, &str)]) -> String {
+    pairs.iter().map(|(k, v)| format!("{k}={}", encode_uri_component(v))).collect::<Vec<_>>().join("&")
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -208,33 +281,50 @@ fn fake_429(var: Option<&str>, s: Svc, now: i64) -> Option<Quota> {
     Some(settle(Err(FetchErr::Quota(QErr::rate_limited(secs.map(|v| now + v * 1000))))))
 }
 
-fn fetch_one(s: Svc) -> Quota {
-    if let Some(q) = fake_429(std::env::var("QUOTA_OVERLAY_FAKE_429").ok().as_deref(), s, now_ms()) {
-        crate::http::log_request("FAKE429", s.key());
+fn fetch_one(a: &Acct) -> Quota {
+    if let Some(q) = fake_429(std::env::var("QUOTA_OVERLAY_FAKE_429").ok().as_deref(), a.svc, now_ms()) {
+        crate::http::log_request("FAKE429", &a.id);
         return q;
     }
-    settle(match s {
-        Svc::Claude => claude::fetch(&claude_creds_path()),
-        Svc::Codex => codex::fetch(&codex_auth_path()),
-        Svc::Cursor => cursor::fetch(&cursor_db_path()),
+    settle(match a.svc {
+        Svc::Claude => claude::fetch(&a.id),
+        Svc::Codex => codex::fetch(&a.id),
+        Svc::Cursor => cursor::fetch(&a.id),
+        Svc::Copilot => copilot::fetch(&a.id),
     })
 }
 
-/// Fetches all services in parallel. `enabled[svc.index()] == false` (switched off in Settings) and services
-/// left out of `QUOTA_OVERLAY_SERVICES` come back as [`Quota::disabled`].
-pub fn fetch_all(enabled: [bool; 3]) -> Snapshot {
+/// Every account to check: the ones signed in here, in the order the user put them in (new ones last).
+pub fn accounts() -> Vec<Acct> {
+    store::list().iter().filter_map(store::Saved::acct).collect()
+}
+
+/// Checks `accts` in parallel. Ids in `skip` (switched off in Settings, or waiting out "too many requests") and
+/// services left out of `QUOTA_OVERLAY_SERVICES` come back as [`Quota::disabled`].
+fn fetch_these(accts: Vec<Acct>, skip: &HashSet<String>) -> Snapshot {
     let only = parse_only(std::env::var("QUOTA_OVERLAY_SERVICES").ok().as_deref());
-    let skip = |s: Svc| !enabled[s.index()] || only.as_ref().is_some_and(|o| !o.iter().any(|k| k == s.key()));
-    let svc = std::thread::scope(|scope| {
-        let handles = SERVICES.map(|s| (!skip(s)).then(|| scope.spawn(move || fetch_one(s))));
-        handles.map(|h| {
-            Some(match h {
-                None => Quota::disabled(),
-                Some(h) => h.join().unwrap_or_else(|_| settle(Err(FetchErr::Unexpected("fetcher panicked".into())))),
+    let skipped = |a: &Acct| skip.contains(&a.id) || only.as_ref().is_some_and(|o| !o.iter().any(|k| k == a.svc.key()));
+    let accts = std::thread::scope(|scope| {
+        let handles: Vec<_> = accts.iter().map(|a| (!skipped(a)).then(|| scope.spawn(move || fetch_one(a)))).collect();
+        accts
+            .iter()
+            .cloned()
+            .zip(handles)
+            .map(|(a, h)| {
+                let q = match h {
+                    None => Quota::disabled(),
+                    Some(h) => h.join().unwrap_or_else(|_| settle(Err(FetchErr::Unexpected("fetcher panicked".into())))),
+                };
+                (a, q)
             })
-        })
+            .collect()
     });
-    Snapshot { svc, fetched_at: now_ms() }
+    Snapshot { accts, fetched_at: now_ms() }
+}
+
+/// Checks every account (see [`accounts`]), but not those in `skip`.
+pub fn fetch_all(skip: &HashSet<String>) -> Snapshot {
+    fetch_these(accounts(), skip)
 }
 
 #[cfg(test)]
@@ -262,11 +352,27 @@ mod tests {
 
     #[test]
     fn all_switched_off() {
-        let s = fetch_all([false; 3]);
-        for q in &s.svc {
-            assert_eq!(q.as_ref(), Some(&Quota::disabled()));
+        let acct = |id: &str, svc| Acct { id: id.into(), svc, who: "a@b".into() };
+        let accts = vec![acct("claude-1a2b3c", Svc::Claude), acct("claude-abc123", Svc::Claude), acct("cursor-0f0f0f", Svc::Cursor)];
+        let skip: HashSet<String> = accts.iter().map(|a| a.id.clone()).collect();
+        let s = fetch_these(accts.clone(), &skip);
+        assert_eq!(s.accts.len(), 3);
+        for ((a, q), want) in s.accts.iter().zip(&accts) {
+            assert_eq!(a, want);
+            assert_eq!(q, &Quota::disabled());
         }
         assert!(s.fetched_at > 0);
+    }
+
+    #[test]
+    fn helpers() {
+        assert_eq!(query(&[("a", "x y"), ("redirect_uri", "http://localhost:1/cb")]), "a=x%20y&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb");
+        assert_eq!(random(16).len(), 16);
+        assert_ne!(random(16), random(16));
+        assert_eq!(b64url(&[0xfb, 0xff]), "-_8");
+        let jwt = format!("x.{}.y", b64url(br#"{"exp":1700000000,"email":"a@b"}"#));
+        assert_eq!(jwt_exp_ms(&jwt), 1_700_000_000_000);
+        assert_eq!(jwt_exp_ms("nope"), 0);
     }
 
     #[test]
@@ -305,12 +411,5 @@ mod tests {
         assert_eq!(entry(&e, "b"), Some(&json!(3)));
         assert!(entries_of(b"null").unwrap().is_empty());
         assert!(entries_of(b"{").is_err());
-    }
-
-    #[test]
-    fn paths_end_where_the_apps_keep_them() {
-        assert!(claude_creds_path().ends_with(".credentials.json"));
-        assert!(codex_auth_path().ends_with("auth.json"));
-        assert!(cursor_db_path().ends_with(Path::new("Cursor/User/globalStorage/state.vscdb")));
     }
 }

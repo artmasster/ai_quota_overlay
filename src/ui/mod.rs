@@ -28,6 +28,7 @@ pub fn svc_color(s: Svc) -> Rgba {
         Svc::Claude => Rgba::hex(0xd97757),
         Svc::Codex => Rgba::hex(0x10a37f),
         Svc::Cursor => Rgba::hex(0xa5b4fc),
+        Svc::Copilot => Rgba::hex(0x58a6ff),
     }
 }
 

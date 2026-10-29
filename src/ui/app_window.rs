@@ -1,18 +1,20 @@
 //! The app window (src/settings.html): custom dark title bar, General / Internet status / Services / Updates,
 //! the action buttons and the footer. Laid out and painted in one pass; the pass records hit rectangles.
+//! Services lists accounts: each service's own login on this machine and the ones signed in here, with buttons
+//! to sign in to more and to sign out.
 use super::gfx::{linear, Canvas, Fill, Filter, Rgba, R};
 use super::svg::Icon;
 use super::text::{Fonts, Style};
 use super::{icons, js_round, level_color, svc_color, ACCENT, ACCENT2, BAD, FAINT, MUTED, OK, TEXT, WARN};
 use crate::anim::Fades;
-use crate::app::{Btn3, CursorKind, Mouse};
+use crate::app::{Btn3, CursorKind, Mouse, Note};
 use crate::i18n::{self, Lang, LANGS};
-use crate::model::{NetState, Snapshot, Svc, Win, SERVICES};
+use crate::model::{Acct, NetState, Quota, Snapshot, Svc, Win, SERVICES};
 use crate::settings::Settings;
 use crate::updater::{During, Phase, View};
 use std::collections::HashMap;
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tiny_skia::{FilterQuality, Pixmap, PixmapPaint, Transform};
 
 const BG: Rgba = Rgba::hex(0x111318);
@@ -27,16 +29,26 @@ const GAP: f32 = 14.0;
 /// small for it the window shrinks, keeping 16:9, and the content scrolls.)
 pub const SIZE: (f64, f64) = (1120.0, 630.0);
 const GUTTER: f32 = 10.0;
+/// A sign-out click waits this long for the second, confirming one; "Copied" shows this long.
+const SURE_FOR: Duration = Duration::from_secs(4);
+const COPIED_FOR: Duration = Duration::from_millis(1500);
 
+#[derive(Clone)]
 pub struct Ctx {
     pub lang: Lang,
     pub settings: Settings,
     pub visible: bool,
     pub startup: Option<bool>,
+    /// Switching "launch at startup" didn't take.
+    pub startup_failed: bool,
     pub data: Option<Snapshot>,
     pub net: Option<NetState>,
     pub update: View,
     pub version: String,
+    /// The service a sign-in is under way for, and the code to type on its page (GitHub).
+    pub login: Option<Svc>,
+    pub login_code: Option<String>,
+    pub note: Option<Note>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -50,8 +62,20 @@ pub enum Hit {
     Slider,
     Startup,
     Network,
-    Service(Svc),
-    Chip(Svc, String),
+    /// An account's switch, by id.
+    Acct(String),
+    /// Anywhere else on an account's card: it can be dragged to another place in the list.
+    Card(String),
+    /// Account id and window id.
+    Chip(String, String),
+    /// "+ Claude" by the Services heading.
+    Add(Svc),
+    /// The button of an account with no login, or one that ran out: service and account id.
+    SignIn(Svc, String),
+    /// Sign out of an account signed in here, or take a service's own login out of this app.
+    SignOut(String),
+    CancelLogin,
+    CopyLink,
     Upd,
     Refresh,
     Snap,
@@ -62,8 +86,43 @@ pub enum Hit {
 
 impl Hit {
     fn pointer(&self) -> bool {
-        !matches!(self, Hit::TitleBar | Hit::Thumb)
+        !matches!(self, Hit::TitleBar | Hit::Thumb | Hit::Card(_))
     }
+}
+
+/// An account card held with the mouse (it moves once the pointer has gone a few px).
+struct CardDrag {
+    id: String,
+    /// Pointer y when pressed, now, and its distance below the card's top.
+    from_y: f32,
+    y: f32,
+    grab_dy: f32,
+    moving: bool,
+}
+
+/// Space between account cards.
+const CARD_GAP: f32 = 10.0;
+/// The held card's shadow, and the room around it in its picture.
+const LIFT_SHADOW: Rgba = Rgba::rgba(0, 0, 0, 0.55);
+const LIFT_PAD: f32 = 40.0;
+
+/// A segmented control's selected pill, sliding toward the chosen option: its left edge (from the control's) and
+/// width now and where they go, and the control's box (repainted while it moves).
+struct Pill {
+    x: f32,
+    w: f32,
+    tx: f32,
+    tw: f32,
+    area: R,
+}
+
+/// Pictures for painting the account list while cards move (device px at `scale`): the window without the cards,
+/// each card, and the held card lifted with its shadow.
+struct Pics {
+    scale: f32,
+    window: Pixmap,
+    cards: HashMap<String, Pixmap>,
+    lifted: Option<(String, Pixmap)>,
 }
 
 pub enum Action {
@@ -76,8 +135,16 @@ pub enum Action {
     Opacity(f64),
     Network(bool),
     Startup(bool),
-    Service(Svc, bool),
-    Window(Svc, String, bool),
+    /// Account id, on.
+    Service(String, bool),
+    /// Account id, window id, shown.
+    Window(String, String, bool),
+    SignIn(Svc),
+    SignOut(String),
+    /// Account id and its new place in the list.
+    MoveTo(String, usize),
+    CancelSignIn,
+    CopyLink,
     Refresh,
     Snap,
     Restart,
@@ -91,18 +158,24 @@ enum Sw {
     Visible,
     Startup,
     Network,
-    Svc(usize),
+    /// An account's switch, by the hit key of its `Hit::Acct`.
+    Acct(u64),
 }
 
 impl Sw {
-    fn hit(self) -> Hit {
+    fn key(self) -> u64 {
         match self {
-            Sw::Visible => Hit::Visible,
-            Sw::Startup => Hit::Startup,
-            Sw::Network => Hit::Network,
-            Sw::Svc(i) => Hit::Service(SERVICES[i]),
+            Sw::Visible => hkey(&Hit::Visible),
+            Sw::Startup => hkey(&Hit::Startup),
+            Sw::Network => hkey(&Hit::Network),
+            Sw::Acct(k) => k,
         }
     }
+}
+
+/// What the Services section lists: the accounts signed in here, by service (none before the first check).
+fn account_rows(ctx: &Ctx) -> Vec<(Acct, Quota)> {
+    ctx.data.as_ref().map(|d| d.accts.clone()).unwrap_or_default()
 }
 
 pub struct AppWin {
@@ -134,6 +207,24 @@ pub struct AppWin {
     spin_rects: Vec<R>,
     slider_rect: R,
     net_rect: R,
+    /// The account whose sign-out was clicked once, and when.
+    sure: Option<(String, Instant)>,
+    copied: Option<Instant>,
+    /// Drag and drop of account cards: the card held, each card's shown top (relative to the list, sliding toward
+    /// its place), where the held card would go, the list's box, whether anything still slides, the frame's dt.
+    card_drag: Option<CardDrag>,
+    slide: HashMap<String, f32>,
+    drop_at: Option<usize>,
+    list_rect: R,
+    sliding: bool,
+    dt: f32,
+    /// The list as last laid out (ids and card heights), its pictures while cards move, and whether a paint leaves
+    /// the cards out (taking the window picture).
+    list: Vec<(String, f32)>,
+    pics: Option<Pics>,
+    cards_hidden: bool,
+    /// Segmented controls' pills, by the hit key of each control's first option.
+    pills: HashMap<u64, Pill>,
 }
 
 fn hkey(h: &Hit) -> u64 {
@@ -169,6 +260,18 @@ impl AppWin {
             spin_rects: Vec::new(),
             slider_rect: R::default(),
             net_rect: R::default(),
+            sure: None,
+            copied: None,
+            card_drag: None,
+            slide: HashMap::new(),
+            drop_at: None,
+            list_rect: R::default(),
+            sliding: false,
+            dt: 0.0,
+            list: Vec::new(),
+            pics: None,
+            cards_hidden: false,
+            pills: HashMap::new(),
         }
     }
 
@@ -182,14 +285,34 @@ impl AppWin {
     }
 
     pub fn cursor(&self) -> CursorKind {
+        if self.card_drag.as_ref().is_some_and(|d| d.moving) {
+            return CursorKind::Grabbing;
+        }
         match &self.hover {
+            Some(Hit::Card(_)) => CursorKind::Grab,
             Some(h) if h.pointer() => CursorKind::Pointer,
             _ => CursorKind::Default,
         }
     }
 
+    /// Where account `id`'s card was painted last (screenshots drive a drag with it).
+    pub fn card_box(&self, id: &str) -> Option<R> {
+        self.rects.get(&hkey(&Hit::Card(id.to_string()))).copied()
+    }
+
+    /// The account list's box with room for the held card's overhang and shadow.
+    fn damage_list(&mut self) {
+        self.damage(self.list_rect.grow(48.0));
+    }
+
     /// Advances animations; true while anything moves.
     pub fn step(&mut self, dt: f32) -> bool {
+        // Added up until the cards are next placed (a paint can wait for its frame across several steps).
+        self.dt += dt;
+        let dragging = self.card_drag.as_ref().is_some_and(|d| d.moving);
+        if self.sliding || dragging {
+            self.damage_list();
+        }
         let fading = self.hovers.moving();
         let mut moving = self.hovers.step(dt);
         for k in fading {
@@ -205,8 +328,35 @@ impl AppWin {
         }
         for k in knobs {
             moving = true;
-            self.damage_key(hkey(&k.hit()));
+            self.damage_key(k.key());
         }
+        // Segmented controls' pills glide to the chosen option (eased: quick, then settling).
+        let k = 1.0 - (-dt.clamp(0.0, 0.1) * 18.0).exp();
+        let mut areas = Vec::new();
+        for p in self.pills.values_mut() {
+            if (p.x - p.tx).abs() > 0.25 || (p.w - p.tw).abs() > 0.25 {
+                p.x += (p.tx - p.x) * k;
+                p.w += (p.tw - p.w) * k;
+                areas.push(p.area);
+            } else if p.x != p.tx || p.w != p.tw {
+                (p.x, p.w) = (p.tx, p.tw);
+                areas.push(p.area);
+            }
+        }
+        for a in areas {
+            moving = true;
+            self.damage(a.grow(4.0));
+        }
+        // The sign-out confirmation and "Copied" go back after a while.
+        if self.sure.as_ref().is_some_and(|(_, t)| t.elapsed() >= SURE_FOR) {
+            self.sure = None;
+            self.dirty = true;
+        }
+        if self.copied.is_some_and(|t| t.elapsed() >= COPIED_FOR) {
+            self.copied = None;
+            self.dirty = true;
+        }
+        moving |= self.sure.is_some() || self.copied.is_some() || self.sliding || dragging;
         if self.refresh_spin || self.spin_from.is_some() {
             moving = true;
             for r in self.spin_rects.clone() {
@@ -247,9 +397,10 @@ impl AppWin {
         let t = if on { 1.0 } else { 0.0 };
         let e = self.switches.entry(k).or_insert((t, t));
         e.1 = t;
-        // transition: transform .18s cubic-bezier(.3, 1.4, .5, 1) (a little overshoot).
-        let p = if e.1 >= e.0 { e.0 } else { 1.0 - e.0 };
-        let eased = super::bezier(0.3, 1.4, 0.5, 1.0, if e.1 >= 0.5 { p } else { 1.0 - p });
+        // transition: transform .18s cubic-bezier(.3, 1.4, .5, 1) (a little overshoot). The curve runs on how far the
+        // knob has come toward where it is going (0 → 1 either way); off is measured back from the right.
+        let done = if e.1 >= 0.5 { e.0 } else { 1.0 - e.0 };
+        let eased = super::bezier(0.3, 1.4, 0.5, 1.0, done);
         if e.1 >= 0.5 {
             eased
         } else {
@@ -267,6 +418,19 @@ impl AppWin {
                     self.damage(self.slider_rect);
                     return out;
                 }
+                if let Some(d) = &mut self.card_drag {
+                    d.y = y;
+                    if !d.moving && (y - d.from_y).abs() > 4.0 {
+                        d.moving = true;
+                        let old = self.hover.take();
+                        self.hovers.target(&[]);
+                        self.damage_hit(&old);
+                    }
+                    if self.card_drag.as_ref().is_some_and(|d| d.moving) {
+                        self.damage_list();
+                        return out;
+                    }
+                }
                 if let Some((y0, s0)) = self.thumb_drag {
                     let track = self.view_h;
                     let ratio = if track > 0.0 { self.content_h / track } else { 1.0 };
@@ -283,7 +447,7 @@ impl AppWin {
                 }
             }
             Mouse::Leave => {
-                if !self.slider_drag && self.thumb_drag.is_none() {
+                if !self.slider_drag && self.thumb_drag.is_none() && self.card_drag.is_none() {
                     let old = self.hover.take();
                     self.hovers.target(&[]);
                     self.damage_hit(&old);
@@ -299,6 +463,10 @@ impl AppWin {
                         out.push(Action::Opacity(self.slider_at(x)));
                     }
                     Some(Hit::Thumb) => self.thumb_drag = Some((y, self.scroll)),
+                    Some(Hit::Card(ref id)) => {
+                        let top = self.rects.get(&hkey(&Hit::Card(id.clone()))).map_or(y, |r| r.y);
+                        self.card_drag = Some(CardDrag { id: id.clone(), from_y: y, y, grab_dy: y - top, moving: false });
+                    }
                     _ => {}
                 }
                 self.damage_hit(&h);
@@ -307,6 +475,18 @@ impl AppWin {
                 }
             }
             Mouse::Up(Btn3::Left) => {
+                // A card let go: it takes the place it was over, sliding there from where it is.
+                if let Some(d) = self.card_drag.take() {
+                    if d.moving {
+                        if let Some(to) = self.drop_at.take() {
+                            out.push(Action::MoveTo(d.id, to));
+                        }
+                        self.pressed = None;
+                        self.sliding = true;
+                        self.damage_list();
+                        return out;
+                    }
+                }
                 let was_slider = self.slider_drag;
                 self.slider_drag = false;
                 self.slider_value = None;
@@ -330,10 +510,29 @@ impl AppWin {
                     Hit::Size(k) => out.push(Action::Size(k)),
                     Hit::Startup => out.push(Action::Startup(!ctx.startup.unwrap_or(false))),
                     Hit::Network => out.push(Action::Network(!s.network)),
-                    Hit::Service(svc) => out.push(Action::Service(svc, !s.services[svc.index()])),
-                    Hit::Chip(svc, id) => {
-                        let shown = !s.hidden[svc.index()].contains(&id);
-                        out.push(Action::Window(svc, id, !shown));
+                    Hit::Acct(id) => {
+                        let on = s.on(&id);
+                        out.push(Action::Service(id, !on));
+                    }
+                    Hit::Chip(id, win) => {
+                        let shown = !s.hidden_of(&id).contains(&win);
+                        out.push(Action::Window(id, win, !shown));
+                    }
+                    Hit::Add(svc) | Hit::SignIn(svc, _) => out.push(Action::SignIn(svc)),
+                    Hit::SignOut(id) => {
+                        if self.sure.as_ref().is_some_and(|(x, t)| *x == id && t.elapsed() < SURE_FOR) {
+                            self.sure = None;
+                            out.push(Action::SignOut(id));
+                        } else {
+                            self.sure = Some((id, Instant::now()));
+                        }
+                        self.dirty = true;
+                    }
+                    Hit::CancelLogin => out.push(Action::CancelSignIn),
+                    Hit::CopyLink => {
+                        self.copied = Some(Instant::now());
+                        self.dirty = true;
+                        out.push(Action::CopyLink);
                     }
                     Hit::Upd => {
                         if let Some(a) = upd_action(&ctx.update).0 {
@@ -348,7 +547,7 @@ impl AppWin {
                     Hit::Snap => out.push(Action::Snap),
                     Hit::Restart => out.push(Action::Restart),
                     Hit::Quit => out.push(Action::Quit),
-                    Hit::TitleBar | Hit::Slider | Hit::Thumb => {}
+                    Hit::TitleBar | Hit::Slider | Hit::Thumb | Hit::Card(_) => {}
                 }
             }
             Mouse::Wheel(n) => {
@@ -476,7 +675,7 @@ impl AppWin {
         let ry = y;
         let visible = ctx.visible;
         let pos = self.switch_pos(Sw::Visible, visible);
-        y += self.row(c, f, x0, ry, cw, &icons::EYE, s.s.show_overlay, Some(s.s.show_overlay_hint), &mut |me, c, f, right, mid| {
+        y += self.row(c, f, x0, ry, cw, &icons::EYE, s.s.show_overlay, Some((s.s.show_overlay_hint, false)), &mut |me, c, f, right, mid| {
             let _ = f;
             me.switch(c, right - 38.0, mid, pos, visible, ACCENT, Hit::Visible);
             (38.0, 22.0)
@@ -526,7 +725,9 @@ impl AppWin {
             y += 1.0;
             y += 1.0;
             let pos = self.switch_pos(Sw::Startup, on);
-            y += self.row(c, f, x0, y, cw, &icons::POWER, s.s.startup, Some(s.s.startup_hint), &mut |me, c, _f, right, mid| {
+            // The last change didn't take (the system or an antivirus kept the startup entry as it was).
+            let startup_hint = if ctx.startup_failed { (s.s.startup_blocked, true) } else { (s.s.startup_hint, false) };
+            y += self.row(c, f, x0, y, cw, &icons::POWER, s.s.startup, Some(startup_hint), &mut |me, c, _f, right, mid| {
                 me.switch(c, right - 38.0, mid, pos, on, ACCENT, Hit::Startup);
                 (38.0, 22.0)
             });
@@ -538,7 +739,7 @@ impl AppWin {
         let pos = self.switch_pos(Sw::Network, net_on);
         let net = ctx.net;
         let net_y = y;
-        y += self.row(c, f, x0, y, cw, &icons::WIFI_ROW, s.s.network_show, Some(s.s.network_hint), &mut |me, c, f, right, mid| {
+        y += self.row(c, f, x0, y, cw, &icons::WIFI_ROW, s.s.network_show, Some((s.s.network_hint, false)), &mut |me, c, f, right, mid| {
             me.switch(c, right - 38.0, mid, pos, net_on, ACCENT, Hit::Network);
             let mut used = 38.0;
             if let (true, Some(n)) = (net_on, net) {
@@ -573,13 +774,14 @@ impl AppWin {
         let hint = Style::new(11.5, 400, FAINT, 1.4);
         y -= 4.0;
         y += f.draw(c, x0 + 4.0, y, s.s.services_hint, &hint, Some(cw - 8.0), 0.0).h;
-        y += 10.0;
-        for (i, svc) in SERVICES.iter().enumerate() {
-            if i > 0 {
-                y += 10.0;
-            }
-            y += self.service(c, f, ctx, *svc, x0, y, cw);
+        y += 8.0;
+        y += self.add_buttons(c, f, ctx, x0, y, cw) + 10.0;
+        y += self.login_line(c, f, ctx, x0, y, cw);
+        let rows = account_rows(ctx);
+        if rows.is_empty() && ctx.data.is_some() {
+            y += self.no_accounts(c, f, ctx, x0, y, cw);
         }
+        y += self.account_list(c, f, ctx, &rows, x0, y, cw);
 
         // ---------- Updates ----------
         y += GAP;
@@ -592,11 +794,13 @@ impl AppWin {
         let right_end = y;
 
         // ---------- actions ---------- (one row under the left column, level with the right column's end when
-        // there is room)
+        // there is room; under the left column when many accounts make the right one run past the window)
         let x0 = 16.0;
         let bw = (cw - 3.0 * 8.0) / 4.0;
         let bh = Style::new(12.5, 500, TEXT, 1.4).lh + 18.0 + 2.0;
-        let y = (left_end + 16.0).max(right_end - bh);
+        let right_col_end = right_end;
+        let fits = right_col_end <= top + self.view_h - 50.0;
+        let y = if fits { (left_end + 16.0).max(right_end - bh) } else { left_end + 16.0 };
         let spin = self.spin_from.map(|t| (t.elapsed().as_secs_f32() % 0.8) / 0.8 * 360.0).unwrap_or(0.0);
         let buttons = [
             (&icons::REFRESH, s.s.refresh, Hit::Refresh, false, if self.refresh_spin { spin } else { 0.0 }),
@@ -612,7 +816,7 @@ impl AppWin {
             self.button(c, f, bx, y, bw, icon, text, hit, danger, rot);
         }
         let left_end = y + bh;
-        let right_end = y;
+        let right_end = right_col_end.max(y);
 
         // ---------- footer ---------- (kept at the bottom of the window when everything fits)
         let x0 = 16.0;
@@ -688,7 +892,7 @@ impl AppWin {
         w: f32,
         icon: &Icon,
         title: &str,
-        hint: Option<&str>,
+        hint: Option<(&str, bool)>,
         right: &mut dyn FnMut(&mut Self, &mut Canvas, &mut Fonts, f32, f32) -> (f32, f32),
     ) -> f32 {
         let ts = Style::new(13.0, 500, TEXT, 1.4);
@@ -704,7 +908,7 @@ impl AppWin {
         };
         let text_w = (w - 28.0 - 30.0 - 14.0 - 14.0 - ctrl_w).max(10.0);
         let th = ts.lh;
-        let hh = hint.map(|h| 1.0 + f.lay(h, &hs, Some(text_w)).h).unwrap_or(0.0);
+        let hh = hint.map(|(h, _)| 1.0 + f.lay(h, &hs, Some(text_w)).h).unwrap_or(0.0);
         let content = (th + hh).max(30.0).max(ctrl_h);
         let rh = (content + 24.0).max(52.0);
         c.fill_rr(R::new(x, y, w, rh), 0.0, SURFACE);
@@ -717,8 +921,8 @@ impl AppWin {
         let tx = x + 14.0 + 30.0 + 14.0;
         let ty = mid - (th + hh) / 2.0;
         f.draw(c, tx, ty, title, &ts, None, 0.0);
-        if let Some(h) = hint {
-            f.draw(c, tx, ty + th + 1.0, h, &hs, Some(text_w), 0.0);
+        if let Some((h, warn)) = hint {
+            f.draw(c, tx, ty + th + 1.0, h, &hs.color(if warn { WARN } else { MUTED }), Some(text_w), 0.0);
         }
         right(self, c, f, x + w - 14.0, mid);
         rh
@@ -748,16 +952,27 @@ impl AppWin {
         let r = R::new(right - w, mid - h / 2.0, w, h);
         c.fill_rr(r, 10.0, BG);
         c.border(r, 10.0, 1.0, LINE);
+        let mut boxes = Vec::with_capacity(items.len());
         let mut x = r.x + 1.0 + 3.0;
-        for ((ic, text, hit, pressed), bw) in items.iter().zip(widths) {
-            let b = R::new(x, r.y + 4.0, bw, bh);
-            if *pressed {
-                c.shadow(b, 7.0, 0.0, 1.0, 3.0, 0.0, Rgba::rgba(0, 0, 0, 0.35));
-                c.fill_rr(b, 7.0, SURFACE2);
-                c.shadow_rrect(b, [7.0; 4], 0.0, 1.0, 0.0, 0.0, Rgba::rgba(255, 255, 255, 0.06), true);
-            }
+        for bw in &widths {
+            boxes.push(R::new(x, r.y + 4.0, *bw, bh));
+            x += bw + 2.0;
+        }
+        // The selected pill slides to the chosen option and takes its width (`step`); new, it starts there.
+        let (tx, tw) = items.iter().zip(&boxes).find(|(it, _)| it.3).map_or((0.0, 0.0), |(_, b)| (b.x - r.x, b.w));
+        let pill = self.pills.entry(hkey(&items[0].2)).or_insert(Pill { x: tx, w: tw, tx, tw, area: r });
+        (pill.tx, pill.tw, pill.area) = (tx, tw, r);
+        let p = R::new(r.x + pill.x, r.y + 4.0, pill.w, bh);
+        if p.w > 0.0 {
+            c.shadow(p, 7.0, 0.0, 1.0, 3.0, 0.0, Rgba::rgba(0, 0, 0, 0.35));
+            c.fill_rr(p, 7.0, SURFACE2);
+            c.shadow_rrect(p, [7.0; 4], 0.0, 1.0, 0.0, 0.0, Rgba::rgba(255, 255, 255, 0.06), true);
+        }
+        for ((ic, text, hit, _), b) in items.iter().zip(boxes) {
+            // Bright under the pill, fading out as it slides away.
+            let under = 1.0 - ((p.cx() - b.cx()).abs() / b.w.max(1.0)).min(1.0);
             let hv = self.hov(hit);
-            let color = if *pressed { TEXT } else { MUTED.lerp(TEXT, hv) };
+            let color = MUTED.lerp(TEXT, under.max(hv));
             let mut tx = b.x + 12.0;
             if let Some(icon) = ic {
                 let (iw, ih) = (icon.vb.0, icon.vb.1);
@@ -766,7 +981,6 @@ impl AppWin {
             }
             f.draw(c, tx, b.cy() - st.lh / 2.0, text, &st.color(color), None, 0.0);
             self.hits.push((b, hit.clone()));
-            x += bw + 2.0;
         }
         (w, h)
     }
@@ -794,14 +1008,294 @@ impl AppWin {
         f.draw(c, right - tw, mid - st.lh / 2.0, &text, &st, None, 0.0);
     }
 
-    /// One `.svc` card; returns its height.
+    /// "+ Claude  + Codex  + Cursor …" (sign in to an account), wrapping across `w`. Returns the height.
+    fn add_buttons(&mut self, c: &mut Canvas, f: &mut Fonts, ctx: &Ctx, x: f32, y: f32, w: f32) -> f32 {
+        let st = Style::new(12.0, 600, TEXT, 1.4);
+        let h = st.lh + 10.0;
+        let (mut bx, mut by) = (x, y);
+        for svc in SERVICES {
+            let label = format!("+ {}", svc.name());
+            let bw = f.width(&label, &st) + 24.0;
+            if bx > x && bx + bw > x + w {
+                bx = x;
+                by += h + 6.0;
+            }
+            let r = R::new(bx, by, bw, h);
+            let hit = Hit::Add(svc);
+            let hv = self.hov(&hit).max(if ctx.login == Some(svc) { 1.0 } else { 0.0 });
+            let col = svc_color(svc);
+            c.fill_rr(r, h / 2.0, col.pct(0.10 + 0.10 * hv));
+            c.border(r, h / 2.0, 1.0, col.pct(0.35 + 0.3 * hv));
+            f.draw(c, r.x + 12.0, r.cy() - st.lh / 2.0, &label, &st.color(col.lerp(TEXT, 0.3 + 0.5 * hv)), None, 0.0);
+            self.hits.push((r, hit));
+            bx += bw + 8.0;
+        }
+        by + h - y
+    }
+
+    /// The account cards in order, with drag and drop: the held card follows the pointer above the others, which
+    /// slide out of its way, and once let go it slides into its place. Returns the height. (While cards move, frames
+    /// are painted from pictures instead, see `draw_part`.)
     #[allow(clippy::too_many_arguments)]
-    fn service(&mut self, c: &mut Canvas, f: &mut Fonts, ctx: &Ctx, svc: Svc, x: f32, y: f32, w: f32) -> f32 {
+    fn account_list(&mut self, c: &mut Canvas, f: &mut Fonts, ctx: &Ctx, rows: &[(Acct, Quota)], x: f32, y: f32, w: f32) -> f32 {
+        if rows.is_empty() {
+            self.list = Vec::new();
+            self.list_rect = R::default();
+            self.sliding = false;
+            return 0.0;
+        }
+        // Heights first, off-canvas (a card keeps its size while it moves).
+        let heights: Vec<f32> = rows
+            .iter()
+            .map(|(a, q)| {
+                let mut scratch = Pixmap::new(1, 1).unwrap();
+                let mut sc = Canvas::new(&mut scratch, c.scale, 0.0, -10000.0);
+                let n = self.hits.len();
+                let h = self.account(&mut sc, f, ctx, a, q, x, 0.0, w);
+                self.hits.truncate(n);
+                h
+            })
+            .collect();
+        let total = heights.iter().sum::<f32>() + CARD_GAP * (rows.len() - 1) as f32;
+        self.list = rows.iter().map(|(a, _)| a.id.clone()).zip(heights.iter().copied()).collect();
+        self.list_rect = R::new(x, y, w, total);
+        if self.cards_hidden {
+            // Painting the window behind the cards (for `draw_part`).
+            return total;
+        }
+        let (order, tops, held) = self.arrange();
+        // The others, then the held one on top with a lifted shadow.
+        for &i in order.iter().filter(|i| held != Some(**i)) {
+            let (a, q) = &rows[i];
+            self.account(c, f, ctx, a, q, x, y + tops[i], w);
+        }
+        if let Some(hi) = held {
+            let (a, q) = &rows[hi];
+            let top = y + tops[hi];
+            c.shadow(R::new(x, top, w, heights[hi]), 14.0, 0.0, 10.0, 28.0, 0.0, LIFT_SHADOW);
+            self.account(c, f, ctx, a, q, x, top, w);
+        }
+        total
+    }
+
+    /// Where the cards of `self.list` go this frame: the held one where the pointer has it (and where it would be
+    /// dropped: before the first other card whose middle is below its own), the others sliding toward their places,
+    /// eased per frame. Returns the painting order, each card's top relative to the list, and the held card.
+    fn arrange(&mut self) -> (Vec<usize>, Vec<f32>, Option<usize>) {
+        let n = self.list.len();
+        let total = self.list_rect.h;
+        let held: Option<(usize, f32)> = self
+            .card_drag
+            .as_ref()
+            .filter(|d| d.moving)
+            .and_then(|d| self.list.iter().position(|(id, _)| *id == d.id).map(|i| (i, d.y - d.grab_dy - self.list_rect.y)));
+        let mut order: Vec<usize> = (0..n).filter(|i| held.is_none_or(|(h, _)| h != *i)).collect();
+        let mut held_top = 0.0;
+        if let Some((hi, top)) = held {
+            held_top = top.clamp(-24.0, total - self.list[hi].1 + 24.0);
+            let mid = held_top + self.list[hi].1 / 2.0;
+            let mut acc = 0.0;
+            let mut at = order.len();
+            for (k, &i) in order.iter().enumerate() {
+                if mid < acc + self.list[i].1 / 2.0 {
+                    at = k;
+                    break;
+                }
+                acc += self.list[i].1 + CARD_GAP;
+            }
+            order.insert(at, hi);
+            self.drop_at = Some(at);
+        }
+        let k = 1.0 - (-std::mem::take(&mut self.dt).clamp(0.0, 0.1) * 16.0).exp();
+        let mut sliding = false;
+        let mut tops = vec![0.0f32; n];
+        let mut acc = 0.0;
+        for &i in &order {
+            let id = &self.list[i].0;
+            let shown = if held.is_some_and(|(h, _)| h == i) {
+                held_top
+            } else {
+                let cur = self.slide.get(id).copied().unwrap_or(acc);
+                let next = if (acc - cur).abs() < 0.5 { acc } else { cur + (acc - cur) * k };
+                sliding |= next != acc;
+                next
+            };
+            self.slide.insert(id.clone(), shown);
+            tops[i] = shown;
+            acc += self.list[i].1 + CARD_GAP;
+        }
+        let list = &self.list;
+        self.slide.retain(|id, _| list.iter().any(|(x, _)| x == id));
+        self.sliding = sliding;
+        (order, tops, held.map(|(h, _)| h))
+    }
+
+    /// Paints the part of the window that changed. While account cards are dragged or slide, that is only the list:
+    /// it is put together from pictures taken when the move began (the window without the cards, and each card),
+    /// rather than laying out and painting every card again each frame.
+    pub fn draw_part(&mut self, c: &mut Canvas, f: &mut Fonts, ctx: &Ctx, w: f32, h: f32) {
+        let moving = self.sliding || self.card_drag.as_ref().is_some_and(|d| d.moving);
+        let rows = account_rows(ctx);
+        let same = rows.len() == self.list.len() && rows.iter().all(|(a, _)| self.list.iter().any(|(id, _)| *id == a.id));
+        if !moving || !same {
+            self.pics = None;
+            return self.draw(c, f, ctx, w, h);
+        }
+        if self.pics.as_ref().is_none_or(|p| p.scale != c.scale) {
+            self.pics = Some(self.take_pics(f, ctx, &rows, w, h, c.scale));
+        }
+        let Some(p) = self.pics.take() else { return };
+        let (order, tops, held) = self.arrange();
+        // The window and the cards resting on it are opaque: copied straight in. The held card is blended (its
+        // shadow), on top.
+        copy_pic(c, &p.window, 0.0, 0.0);
+        let (lx, ly) = (self.list_rect.x, self.list_rect.y);
+        for &i in order.iter().filter(|i| held != Some(**i)) {
+            if let Some(pic) = p.cards.get(&self.list[i].0) {
+                copy_pic(c, pic, lx, ly + tops[i]);
+            }
+        }
+        if let (Some(i), Some((id, pic))) = (held, p.lifted.as_ref()) {
+            if self.list[i].0 == *id {
+                let inv = 1.0 / p.scale;
+                let paint = PixmapPaint { quality: FilterQuality::Nearest, ..PixmapPaint::default() };
+                let (dx, dy) = (lx - LIFT_PAD, ly + tops[i] - LIFT_PAD);
+                c.pm.draw_pixmap(0, 0, pic.as_ref(), &paint, c.base.pre_translate(dx, dy).pre_scale(inv, inv), None);
+            }
+        }
+        self.pics = Some(p);
+        // Settled: one full paint brings back the cards' hit boxes (the window picture was taken without them).
+        if !self.sliding && self.card_drag.as_ref().is_none_or(|d| !d.moving) {
+            self.pics = None;
+            self.dirty = true;
+        }
+    }
+
+    /// The pictures `draw_part` is put together from, at `scale` device px per DIP.
+    #[allow(clippy::too_many_arguments)]
+    fn take_pics(&mut self, f: &mut Fonts, ctx: &Ctx, rows: &[(Acct, Quota)], w: f32, h: f32, scale: f32) -> Pics {
+        let px = |v: f32| (v * scale).ceil().max(1.0) as u32;
+        // The window without the cards. (Painting resets the hit boxes; the cards' come back with the next full paint.)
+        let mut window = Pixmap::new(px(w), px(h)).unwrap();
+        self.cards_hidden = true;
+        {
+            let mut c = Canvas::new(&mut window, scale, 0.0, 0.0);
+            self.draw(&mut c, f, ctx, w, h);
+        }
+        self.cards_hidden = false;
+        let (lx, lw) = (self.list_rect.x, self.list_rect.w);
+        let held = self.card_drag.as_ref().filter(|d| d.moving).map(|d| d.id.clone());
+        let mut cards = HashMap::new();
+        let mut lifted = None;
+        for ((a, q), (_, ch)) in rows.iter().zip(self.list.clone()) {
+            let n = self.hits.len();
+            // On the window's colour, so it can be copied in without blending.
+            let mut pic = Pixmap::new(px(lw), px(ch)).unwrap();
+            pic.fill(BG.sk());
+            {
+                let mut c = Canvas::new(&mut pic, scale, -lx, 0.0);
+                self.account(&mut c, f, ctx, a, q, lx, 0.0, lw);
+            }
+            if held.as_deref() == Some(a.id.as_str()) {
+                let mut pic = Pixmap::new(px(lw + 2.0 * LIFT_PAD), px(ch + 2.0 * LIFT_PAD)).unwrap();
+                {
+                    let mut c = Canvas::new(&mut pic, scale, -lx + LIFT_PAD, LIFT_PAD);
+                    c.shadow(R::new(lx, 0.0, lw, ch), 14.0, 0.0, 10.0, 28.0, 0.0, LIFT_SHADOW);
+                    self.account(&mut c, f, ctx, a, q, lx, 0.0, lw);
+                }
+                lifted = Some((a.id.clone(), pic));
+            }
+            self.hits.truncate(n);
+            cards.insert(a.id.clone(), pic);
+        }
+        Pics { scale, window, cards, lifted }
+    }
+
+    /// In place of the accounts while there are none. Returns the height.
+    fn no_accounts(&mut self, c: &mut Canvas, f: &mut Fonts, ctx: &Ctx, x: f32, y: f32, w: f32) -> f32 {
         let s = i18n::t(ctx.lang);
+        let ts = Style::new(13.0, 500, TEXT, 1.4);
+        let hs = Style::new(11.5, 400, MUTED, 1.4);
+        let tw = w - 2.0 * 18.0;
+        let th = f.lay(s.s.no_accounts, &ts, Some(tw)).h;
+        let hh = f.lay(s.s.no_accounts_hint, &hs, Some(tw)).h;
+        let h = 18.0 + th + 3.0 + hh + 18.0;
+        let r = R::new(x, y, w, h);
+        c.fill_rr(r, 14.0, SURFACE);
+        c.border(r, 14.0, 1.0, LINE);
+        f.draw(c, x + 18.0, y + 18.0, s.s.no_accounts, &ts, Some(tw), 0.0);
+        f.draw(c, x + 18.0, y + 18.0 + th + 3.0, s.s.no_accounts_hint, &hs, Some(tw), 0.0);
+        h
+    }
+
+    /// The sign-in under way (with Copy link and Cancel), or how the last one went. Returns the height it took.
+    fn login_line(&mut self, c: &mut Canvas, f: &mut Fonts, ctx: &Ctx, x: f32, y: f32, w: f32) -> f32 {
+        let s = i18n::t(ctx.lang);
+        if let Some(svc) = ctx.login {
+            let col = svc_color(svc);
+            let ts = Style::new(12.5, 600, TEXT, 1.4);
+            let hs = Style::new(11.5, 400, MUTED, 1.4);
+            let bs = Style::new(12.0, 500, TEXT, 1.4);
+            // GitHub: a code to type on its page (copied for the user once it comes); the others: the page itself.
+            let device = svc == Svc::Copilot;
+            let copy = match (self.copied.is_some(), device) {
+                (true, _) => s.s.copied,
+                (false, true) => s.s.copy_code,
+                (false, false) => s.s.copy_link,
+            };
+            let mut buttons = vec![(copy, Hit::CopyLink), (s.s.cancel, Hit::CancelLogin)];
+            if device && ctx.login_code.is_none() {
+                buttons.remove(0);
+            }
+            let bws: Vec<f32> = buttons.iter().map(|(l, _)| f.width(l, &bs) + 24.0).collect();
+            let all_w = bws.iter().sum::<f32>() + 8.0 * (bws.len() as f32 - 1.0);
+            let tx = x + 14.0 + 8.0 + 10.0;
+            let text_w = (x + w - 14.0 - all_w - 14.0 - tx).max(40.0);
+            let (title, hint) = match (device, &ctx.login_code) {
+                (true, Some(code)) => (i18n::enter_code(ctx.lang, code), s.s.code_hint),
+                (true, None) => (s.s.getting_code.to_string(), s.s.other_account),
+                (false, _) => (i18n::waiting(ctx.lang, svc.name()), s.s.other_account),
+            };
+            let th = f.lay(&title, &ts, Some(text_w)).h;
+            let hh = f.lay(hint, &hs, Some(text_w)).h;
+            let bh = bs.lh + 12.0;
+            let h = 12.0 + (th + 2.0 + hh).max(bh) + 12.0;
+            let r = R::new(x, y, w, h);
+            c.fill_rr(r, 14.0, col.pct(0.08));
+            c.border(r, 14.0, 1.0, col.pct(0.4));
+            c.glow_circle(x + 14.0 + 4.0, y + 12.0 + ts.lh / 2.0, 4.0, 0.0, 6.0, 0.0, col);
+            c.fill_circle(x + 14.0 + 4.0, y + 12.0 + ts.lh / 2.0, 4.0, col);
+            f.draw(c, tx, y + 12.0, &title, &ts, Some(text_w), 0.0);
+            f.draw(c, tx, y + 12.0 + th + 2.0, hint, &hs, Some(text_w), 0.0);
+            let mut bx = x + w - 14.0 - all_w;
+            for ((label, hit), bw) in buttons.into_iter().zip(bws) {
+                let b = R::new(bx, y + h / 2.0 - bh / 2.0, bw, bh);
+                let hv = self.hov(&hit);
+                c.fill_rr(b, 8.0, SURFACE2.lerp(Rgba::hex(0x252937), hv));
+                c.border(b, 8.0, 1.0, LINE2);
+                f.draw(c, b.x + 12.0, b.cy() - bs.lh / 2.0, label, &bs, None, 0.0);
+                self.hits.push((b, hit));
+                bx += bw + 8.0;
+            }
+            return h + 10.0;
+        }
+        if let Some(n) = &ctx.note {
+            let st = Style::new(11.5, 600, if n.bad { WARN } else { OK }, 1.4);
+            return f.draw(c, x + 4.0, y, &n.text, &st, Some(w - 8.0), 0.0).h + 10.0;
+        }
+        0.0
+    }
+
+    /// One account's `.svc` card; returns its height.
+    #[allow(clippy::too_many_arguments)]
+    fn account(&mut self, c: &mut Canvas, f: &mut Fonts, ctx: &Ctx, a: &Acct, q: &Quota, x: f32, y: f32, w: f32) -> f32 {
+        let s = i18n::t(ctx.lang);
+        let svc = a.svc;
         let col = svc_color(svc);
-        let on = ctx.settings.services[svc.index()];
-        let r = if on { ctx.data.as_ref().and_then(|d| d.get(svc)).cloned() } else { None };
-        let hidden = &ctx.settings.hidden[svc.index()];
+        let on = ctx.settings.on(&a.id);
+        // Just switched on (not checked yet) reads as checking.
+        let r = (on && !q.disabled).then(|| q.clone());
+        let hidden = ctx.settings.hidden_of(&a.id);
 
         // Body first (to know the height).
         let body_x = x + 1.0 + 14.0 + 43.0;
@@ -809,26 +1303,32 @@ impl AppWin {
         let note = Style::new(11.5, 400, FAINT, 1.4);
         let chip_st = Style::new(12.0, 400, MUTED, 1.4);
         let pct_st = Style::new(11.0, 600, MUTED, 1.4).tab();
+        let btn_st = Style::new(12.0, 600, Rgba::WHITE, 1.4);
+        let btn_h = btn_st.lh + 10.0;
         let live = r.as_ref().filter(|q| q.ok && !q.windows.is_empty()).map(|q| q.windows.clone());
-        let wins: Vec<Win> = live.clone().or_else(|| ctx.settings.seen[svc.index()].clone()).unwrap_or_default();
+        let wins: Vec<Win> = live.clone().or_else(|| ctx.settings.seen.get(&a.id).cloned()).unwrap_or_default();
         enum Body {
             Note(String, bool),
-            Chips(Option<String>),
+            /// The windows, under a line about the latest check when it failed (a warning, or not when it only has
+            /// to wait).
+            Chips(Option<(String, bool)>),
+            /// A login that ran out: why, and the button to sign in again.
+            SignIn(String),
         }
-        let body = if on && r.as_ref().is_some_and(|q| q.absent) {
-            Body::Note(
-                match svc {
-                    Svc::Claude => s.s.login_claude,
-                    Svc::Codex => s.s.login_codex,
-                    Svc::Cursor => s.s.login_cursor,
-                }
-                .to_string(),
-                false,
-            )
+        // Old numbers kept through "too many requests": nothing is wrong, the app just waits before asking again.
+        let waiting = r.as_ref().filter(|q| q.ok && q.rate_limited());
+        let expired = r.as_ref().and_then(|q| q.error.as_ref()).filter(|e| e.code == "appExpired");
+        let body = if let Some(e) = expired {
+            Body::SignIn(i18n::error_text(e, ctx.lang))
         } else if !wins.is_empty() {
             // Also when old numbers are shown because the latest check failed.
-            let err = r.as_ref().and_then(|q| q.error.as_ref()).map(|e| i18n::error_text(e, ctx.lang));
-            Body::Chips(if on { err } else { None })
+            let line = if let Some(q) = waiting {
+                let when = q.retry.map(|rt| i18n::retry_at(ctx.lang, &crate::fmt::time(rt.at, ctx.lang), rt.manual));
+                Some((when.unwrap_or_else(|| s.retry_hint.to_string()), false))
+            } else {
+                r.as_ref().and_then(|q| q.error.as_ref()).map(|e| (i18n::error_text(e, ctx.lang), true))
+            };
+            Body::Chips(if on { line } else { None })
         } else if let Some(e) = r.as_ref().filter(|q| on && !q.ok).and_then(|q| q.error.as_ref()) {
             Body::Note(i18n::error_text(e, ctx.lang), true)
         } else {
@@ -840,9 +1340,10 @@ impl AppWin {
         let mut body_h;
         match &body {
             Body::Note(t, _) => body_h = f.lay(t, &note, Some(body_w)).h,
-            Body::Chips(err) => {
+            Body::SignIn(t) => body_h = f.lay(t, &note, Some(body_w)).h + 8.0 + btn_h,
+            Body::Chips(line) => {
                 body_h = 0.0;
-                if let Some(e) = err {
+                if let Some((e, _)) = line {
                     body_h += f.lay(e, &note, Some(body_w)).h + 8.0;
                 }
                 let (mut cx, mut cy) = (0.0f32, body_h);
@@ -875,8 +1376,13 @@ impl AppWin {
         let head_h = (13.5f32 * 1.4 + status_line).max(32.0);
         let total = 1.0 + 12.0 + head_h + 11.0 + body_h + 12.0 + 1.0;
         let card = R::new(x, y, w, total);
+        // The card itself is the drag handle (its buttons, switch and chips are hit first, being added later).
+        let grab = Hit::Card(a.id.clone());
+        let hv = self.hov(&grab);
+        self.hits.push((card, grab));
         c.fill_rr(card, 14.0, SURFACE);
-        c.border(card, 14.0, 1.0, if on { col.mix(0.28, LINE) } else { LINE });
+        let edge = if on { col.mix(0.28, LINE) } else { LINE };
+        c.border(card, 14.0, 1.0, edge.lerp(LINE2.lerp(col, 0.35), hv));
         if on {
             let strip = R::new(x - 1.0 + 0.0, y + 14.0, 3.0, total - 28.0);
             c.shadow_rrect(strip, [0.0, 3.0, 3.0, 0.0], 0.0, 0.0, 10.0, 0.0, col.pct(0.6), false);
@@ -920,6 +1426,7 @@ impl AppWin {
             match &r {
                 None => (s.s.checking, FAINT, MUTED),
                 Some(q) if q.absent => (s.s.absent, FAINT, MUTED),
+                Some(q) if q.ok && q.rate_limited() => (s.s.waiting, FAINT, MUTED),
                 Some(q) if !q.ok || q.error.is_some() => (s.s.failed, WARN, WARN),
                 Some(_) => (s.s.connected, OK, MUTED),
             }
@@ -929,9 +1436,40 @@ impl AppWin {
             c.glow_circle(nx + 3.0, sy + ss.lh / 2.0, 3.0, 0.0, 5.0, 0.0, OK);
         }
         c.fill_circle(nx + 3.0, sy + ss.lh / 2.0, 3.0, dot);
-        f.draw(c, nx + 6.0 + 5.0, sy, status, &ss.color(scol), None, 0.0);
-        let pos = self.switch_pos(Sw::Svc(svc.index()), on);
-        self.switch(c, x + w - 1.0 - 14.0 - 38.0, mid, pos, on, col, Hit::Service(svc));
+        let status_w = f.draw(c, nx + 6.0 + 5.0, sy, status, &ss.color(scol), None, 0.0).w;
+
+        // Right: sign out, then the switch.
+        let sw_x = x + w - 1.0 - 14.0 - 38.0;
+        let right;
+        {
+            let hit = Hit::SignOut(a.id.clone());
+            let sure = self.sure.as_ref().is_some_and(|(id, _)| *id == a.id);
+            let bs = Style::new(12.0, 500, if sure { BAD } else { MUTED }, 1.4);
+            let label = if sure { s.s.sure } else { s.s.sign_out };
+            let bw = f.width(label, &bs) + 22.0;
+            let bh = bs.lh + 10.0;
+            let b = R::new(sw_x - 12.0 - bw, mid - bh / 2.0, bw, bh);
+            let hv = self.hov(&hit);
+            if sure {
+                c.fill_rr(b, 8.0, BAD.pct(0.12 + 0.06 * hv));
+                c.border(b, 8.0, 1.0, BAD.pct(0.45));
+            } else {
+                c.fill_rr(b, 8.0, SURFACE.lerp(SURFACE2, hv));
+                c.border(b, 8.0, 1.0, LINE2);
+            }
+            f.draw(c, b.x + 11.0, b.cy() - bs.lh / 2.0, label, &bs.color(if sure { BAD } else { MUTED.lerp(TEXT, hv) }), None, 0.0);
+            self.hits.push((b, hit));
+            right = b.x;
+        }
+        // Whose account it is, after the status.
+        if !a.who.is_empty() {
+            let wx = nx + 6.0 + 5.0 + status_w + 6.0;
+            let line = f.ellipsize(&format!("· {}", a.who), &ss.color(FAINT), (right - 10.0 - wx).max(20.0));
+            f.draw(c, wx, sy, &line, &ss.color(FAINT), None, 0.0);
+        }
+        let hit = Hit::Acct(a.id.clone());
+        let pos = self.switch_pos(Sw::Acct(hkey(&hit)), on);
+        self.switch(c, sw_x, mid, pos, on, col, hit);
 
         // Body.
         let by = hy + head_h + 11.0;
@@ -939,14 +1477,25 @@ impl AppWin {
             Body::Note(t, err) => {
                 f.draw(c, body_x, by, &t, &note.color(if err { WARN } else { FAINT }), Some(body_w), 0.0);
             }
-            Body::Chips(err) => {
-                if let Some(e) = err {
-                    f.draw(c, body_x, by, &e, &note.color(WARN), Some(body_w), 0.0);
+            Body::SignIn(t) => {
+                let th = f.draw(c, body_x, by, &t, &note.color(WARN), Some(body_w), 0.0).h;
+                let hit = Hit::SignIn(svc, a.id.clone());
+                let hv = self.hov(&hit);
+                let bw = f.width(s.s.sign_in, &btn_st) + 28.0;
+                let b = R::new(body_x, by + th + 8.0, bw, btn_h);
+                c.shadow(b, 8.0, 0.0, 2.0, 10.0, 0.0, col.pct(0.3));
+                c.layer_in(b, 1.0, Filter { grayscale: 0.0, brightness: 1.0 + 0.12 * hv }, |c| c.fill_rr(b, 8.0, col));
+                f.draw(c, b.x + 14.0, b.cy() - btn_st.lh / 2.0, s.s.sign_in, &btn_st, None, 0.0);
+                self.hits.push((b, hit));
+            }
+            Body::Chips(line) => {
+                if let Some((e, warn)) = line {
+                    f.draw(c, body_x, by, &e, &note.color(if warn { WARN } else { FAINT }), Some(body_w), 0.0);
                 }
                 for (cr, wdw, label, pct) in chips {
                     let r = R::new(body_x + cr.x, by + cr.y, cr.w, cr.h);
                     let shown = !hidden.contains(&wdw.id);
-                    let hit = Hit::Chip(svc, wdw.id.clone());
+                    let hit = Hit::Chip(a.id.clone(), wdw.id.clone());
                     let hv = if on { self.hov(&hit) } else { 0.0 };
                     let draw_chip = |c: &mut Canvas, f: &mut Fonts| {
                         if shown {
@@ -1132,6 +1681,27 @@ fn upd_action(u: &View) -> (Option<&'static str>, Option<&'static str>) {
     }
 }
 
+/// Copies opaque picture `pic` (device px) into the canvas with its top-left at (x, y) DIP, to the nearest device
+/// px and clipped to the canvas: rows copied as they are, no blending.
+fn copy_pic(c: &mut Canvas, pic: &Pixmap, x: f32, y: f32) {
+    let (dx, dy) = ((c.base.sx * x + c.base.tx).round() as i64, (c.base.sy * y + c.base.ty).round() as i64);
+    let (cw, ch) = (c.pm.width() as i64, c.pm.height() as i64);
+    let (pw, ph) = (pic.width() as i64, pic.height() as i64);
+    let (x0, x1) = (dx.max(0), (dx + pw).min(cw));
+    let (y0, y1) = (dy.max(0), (dy + ph).min(ch));
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    let n = ((x1 - x0) * 4) as usize;
+    let src = pic.data();
+    let dst = c.pm.data_mut();
+    for row in y0..y1 {
+        let s = (((row - dy) * pw + (x0 - dx)) * 4) as usize;
+        let d = ((row * cw + x0) * 4) as usize;
+        dst[d..d + n].copy_from_slice(&src[s..s + n]);
+    }
+}
+
 /// The app icon (build/icon.png), decoded once.
 pub fn icon_pixmap() -> &'static Option<Pixmap> {
     static ICON: OnceLock<Option<Pixmap>> = OnceLock::new();
@@ -1148,3 +1718,30 @@ fn draw_app_icon(c: &mut Canvas, x: f32, y: f32, size: f32) {
 
 #[allow(dead_code)]
 fn _unused(_: Fill) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Switching off slides the knob from on to off (overshooting a little), never back toward on.
+    #[test]
+    fn switch_knob_goes_where_it_was_sent() {
+        let mut aw = AppWin::new();
+        assert_eq!(aw.switch_pos(Sw::Network, true), 1.0);
+        for (on, from, to) in [(false, 1.0, 0.0), (true, 0.0, 1.0)] {
+            let mut pos = aw.switch_pos(Sw::Network, on);
+            assert!((pos - from).abs() < 1e-4, "starts where it was: {pos}");
+            aw.step(0.016);
+            let first = aw.switch_pos(Sw::Network, on);
+            // The curve starts fast (about a third of the way after one frame), but toward `to`: the old easing put
+            // it past `to` at once and then slid it back toward `from`.
+            assert!((first - from).abs() < 0.5 && (to - first) * (to - from) > 0.0, "one frame in: {first}");
+            for _ in 0..30 {
+                aw.step(0.016);
+                pos = aw.switch_pos(Sw::Network, on);
+                assert!((pos - from).abs() <= 1.2, "{pos}");
+            }
+            assert!((pos - to).abs() < 1e-4, "ends at {to}: {pos}");
+        }
+    }
+}
