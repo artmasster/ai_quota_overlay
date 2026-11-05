@@ -162,6 +162,18 @@ pub fn run(dir: &Path) -> std::io::Result<()> {
             shots.push((c, lang, false, false, None, Pop::Panel(CLAUDE, 0), Some(stale.clone())));
         }
     }
+    // The reset row at its widest: a long countdown beside "Tomorrow …", and a date far off.
+    if extra {
+        let resets_in = |ms: i64| {
+            let mut q = demo(built).accts[0].1.clone();
+            q.windows[0].resets_at = Some(now + ms);
+            q
+        };
+        for (lang, [a, b]) in [(Lang::En, ["row-tomorrow-en", "row-far-en"]), (Lang::Th, ["row-tomorrow-th", "row-far-th"])] {
+            shots.push((a, lang, false, false, None, Pop::Panel(CLAUDE, 0), Some(resets_in(24 * H - 60_000))));
+            shots.push((b, lang, false, false, None, Pop::Panel(CLAUDE, 0), Some(resets_in(27 * D + 7 * H))));
+        }
+    }
     for (name, lang, vertical, network, net, pop, claude_override) in shots {
         let mut data = if name == "hero" || name.starts_with("accounts") { demo_two(built) } else { demo(built) };
         if name.starts_with("empty") {

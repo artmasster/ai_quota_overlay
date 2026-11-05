@@ -44,6 +44,21 @@ pub fn when(ms: i64, now: i64, lang: Lang) -> String {
     }
 }
 
+/// `when` for a tight spot: only the time today and tomorrow (the countdown beside it says which day), else no
+/// weekday: "Oct 19 02:29 PM" / "19 ต.ค. 14:29".
+pub fn when_short(ms: i64, now: i64, lang: Lang) -> String {
+    let at = local(ms);
+    let time = time(ms, lang);
+    if matches!((at.date_naive() - local(now).date_naive()).num_days(), 0 | 1) {
+        return time;
+    }
+    let mo = at.month0() as usize;
+    match lang {
+        Lang::En => format!("{} {} {time}", EN_MO[mo], at.day()),
+        Lang::Th => format!("{} {} {time}", at.day(), TH_MO[mo]),
+    }
+}
+
 /// Time left as "2 h 41 min" (rounded to whole seconds first, like the page).
 pub fn until(ms: i64, now: i64, lang: Lang) -> String {
     let mut s = ((ms - now) as f64 / 1000.0).round().max(0.0) as i64;
@@ -69,5 +84,31 @@ pub fn grouped(n: i64) -> String {
         format!("-{out}")
     } else {
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HOUR: i64 = 3_600_000;
+
+    #[test]
+    fn when_short_is_the_time_alone_today_and_tomorrow() {
+        let now = crate::model::now_ms();
+        for lang in [Lang::En, Lang::Th] {
+            // An hour on is today or just past midnight, whatever the time now.
+            assert_eq!(when_short(now + HOUR, now, lang), time(now + HOUR, lang));
+        }
+    }
+
+    #[test]
+    fn when_short_drops_only_the_weekday_further_off() {
+        let now = crate::model::now_ms();
+        let at = now + 240 * HOUR;
+        for lang in [Lang::En, Lang::Th] {
+            let (full, short) = (when(at, now, lang), when_short(at, now, lang));
+            assert!(full.ends_with(&short) && short.len() < full.len(), "{full} / {short}");
+        }
     }
 }

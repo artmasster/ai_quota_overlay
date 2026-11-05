@@ -90,19 +90,21 @@ fn window<'a>(inp: &PanelIn<'a>) -> Option<&'a crate::model::Win> {
     }
 }
 
-/// Rows under the ring: (icon, label, bold value, extra plain text after the value, right-aligned text).
-fn rows(inp: &PanelIn) -> Vec<(super::svg::Icon, String, String, String, String)> {
+/// Rows under the ring: (icon, label, bold value, extra plain text after the value, the right-aligned text in the
+/// wordings it can take, longest first).
+fn rows(inp: &PanelIn) -> Vec<(super::svg::Icon, String, String, String, Vec<String>)> {
     let t = i18n::t(inp.lang);
     let mut rows = Vec::new();
     let Some(w) = window(inp) else { return rows };
     if let Some(at) = w.resets_at {
-        rows.push((icons::CLOCK, t.resets_in.to_string(), fmt::until(at, inp.now, inp.lang), String::new(), fmt::when(at, inp.now, inp.lang)));
+        let right = vec![fmt::when(at, inp.now, inp.lang), fmt::when_short(at, inp.now, inp.lang)];
+        rows.push((icons::CLOCK, t.resets_in.to_string(), fmt::until(at, inp.now, inp.lang), String::new(), right));
     }
     if inp.svc == Svc::Codex && inp.q.credits.is_some() {
         let b = inp.q.credits.unwrap_or(0.0).floor() as i64;
-        rows.push((icons::COIN, t.credits_left.to_string(), fmt::grouped(b), String::new(), String::new()));
+        rows.push((icons::COIN, t.credits_left.to_string(), fmt::grouped(b), String::new(), Vec::new()));
     } else if let Some(x) = &inp.q.extra {
-        rows.push((icons::COIN, t.extra_usage.to_string(), format!("${:.2}", x.used / 100.0), format!(" / ${:.0}", x.limit / 100.0), String::new()));
+        rows.push((icons::COIN, t.extra_usage.to_string(), format!("${:.2}", x.used / 100.0), format!(" / ${:.0}", x.limit / 100.0), Vec::new()));
     }
     rows
 }
@@ -273,11 +275,12 @@ pub fn draw(c: &mut Canvas, f: &mut Fonts, l: &PanelLayout, inp: &PanelIn, fx: &
         let vw = f.draw(c, x, ry, &value, &bold, None, 0.0).w;
         x += vw;
         if !after.is_empty() {
-            f.draw(c, x, ry, &after, &rs, None, 0.0);
+            x += f.draw(c, x, ry, &after, &rs, None, 0.0).w;
         }
-        if !right.is_empty() {
-            let rw = f.width(&right, &when);
-            f.draw(c, CONTENT_X + CONTENT_W - rw, mid - when.lh / 2.0, &right, &when, None, 0.0);
+        // The first wording that clears the left part; when none does, the countdown says enough.
+        if let Some(r) = right.iter().find(|r| x + 8.0 + f.width(r, &when) <= CONTENT_X + CONTENT_W) {
+            let rw = f.width(r, &when);
+            f.draw(c, CONTENT_X + CONTENT_W - rw, mid - when.lh / 2.0, r, &when, None, 0.0);
         }
         ry += rs.lh + 4.0;
     }
