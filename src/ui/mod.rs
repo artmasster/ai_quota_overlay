@@ -77,6 +77,21 @@ pub fn ring_label(w: &Win, lang: Lang) -> String {
     }
 }
 
+/// How much of the window's time is left, in percent, to set against how much of its quota is. Its length is `span`;
+/// Cursor's and Copilot's windows have none but run from the same day of the month before. None when it isn't known.
+pub fn time_left_pct(w: &Win, svc: Svc, now: i64) -> Option<f64> {
+    let at = w.resets_at?;
+    let len = match w.span.filter(|s| *s > 0.0) {
+        Some(s) => s * 1000.0,
+        None if w.billing || matches!(svc, Svc::Cursor | Svc::Copilot) => {
+            let end = chrono::DateTime::from_timestamp_millis(at)?;
+            (at - end.checked_sub_months(chrono::Months::new(1))?.timestamp_millis()) as f64
+        }
+        None => return None,
+    };
+    Some(clamp_pct((at - now) as f64 / len * 100.0))
+}
+
 /// CSS ease-out / ease-in-out timing curves (cubic-bezier).
 pub fn ease_out(t: f32) -> f32 {
     bezier(0.0, 0.0, 0.58, 1.0, t)
@@ -103,4 +118,39 @@ pub fn bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
         }
     }
     by((lo + hi) / 2.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DAY: i64 = 86_400_000;
+
+    #[test]
+    fn time_left_of_a_window_with_a_span() {
+        let w = Win { span: Some(7.0 * 86400.0), resets_at: Some(10 * DAY), ..Win::default() };
+        // 3.5 of 7 days gone.
+        assert_eq!(time_left_pct(&w, Svc::Claude, 10 * DAY - 7 * DAY / 2), Some(50.0));
+        // Reset already past (old numbers), or a clock behind the window's start.
+        assert_eq!(time_left_pct(&w, Svc::Claude, 11 * DAY), Some(0.0));
+        assert_eq!(time_left_pct(&w, Svc::Claude, 0), Some(100.0));
+    }
+
+    #[test]
+    fn monthly_windows_run_from_the_month_before() {
+        // 2026-11-01 00:00 UTC; October has 31 days.
+        let at = 1_793_491_200_000;
+        let cursor = Win { billing: true, resets_at: Some(at), ..Win::default() };
+        assert!((time_left_pct(&cursor, Svc::Cursor, at - 31 * DAY * 3 / 4).unwrap() - 75.0).abs() < 1e-9);
+        let copilot = Win { name: Some("Premium".into()), resets_at: Some(at), ..Win::default() };
+        assert!((time_left_pct(&copilot, Svc::Copilot, at - 31 * DAY / 4).unwrap() - 25.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn no_time_left_without_a_length_or_a_reset() {
+        let unknown = Win { id: "seven_day_new".into(), resets_at: Some(DAY), ..Win::default() };
+        assert_eq!(time_left_pct(&unknown, Svc::Claude, 0), None);
+        let no_reset = Win { span: Some(18000.0), ..Win::default() };
+        assert_eq!(time_left_pct(&no_reset, Svc::Claude, 0), None);
+    }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "ai-quota-overlay"
-version = "2.1.0"
+version = "2.1.1"
 edition = "2021"
 description = "Tiny always-on-top rings showing how much Claude, Codex, Cursor and Copilot quota you have left"
 license = "MIT"

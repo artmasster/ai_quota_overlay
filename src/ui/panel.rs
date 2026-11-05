@@ -2,7 +2,7 @@
 use super::card::central_text;
 use super::gfx::{Canvas, Rgba, R};
 use super::text::{Fonts, Style};
-use super::{clamp_pct, icons, js_round, level_color, ring_label, svc_color, LINE, MUTED, TEXT, TRACK, WARN};
+use super::{clamp_pct, icons, js_round, level_color, ring_label, svc_color, time_left_pct, LINE, MUTED, OK, TEXT, TRACK, WARN};
 use crate::fmt;
 use crate::i18n::{self, Lang};
 use crate::model::{Quota, Svc};
@@ -205,18 +205,52 @@ pub fn draw(c: &mut Canvas, f: &mut Fonts, l: &PanelLayout, inp: &PanelIn, fx: &
     let color = level_color(left);
     let (rcx, rcy) = (CONTENT_X + 29.0, y + 29.0);
     c.ring(rcx, rcy, 25.0, 6.0, TRACK, (left / 100.0) as f32, if left > 0.0 { color } else { Rgba::TRANSPARENT });
-    central_text(c, f, rcx, rcy, &ring_label(w, inp.lang), &Style::new(11.0, 600, MUTED, 1.3));
+    // Inside it, how much of the window's time is left: quota going faster than time shows as the inner arc passing
+    // the outer one.
+    let time = time_left_pct(w, inp.svc, inp.now);
+    let time_color = TEXT.fade(0.8);
+    if let Some(p) = time {
+        c.ring(rcx, rcy, 18.0, 3.0, Rgba::rgba(255, 255, 255, 0.07), (p / 100.0) as f32, time_color);
+    }
+    let label = ring_label(w, inp.lang);
+    let label_style = Style::new(11.0, 600, MUTED, 1.3);
+    // A long name ("Premium") no longer fits inside the inner ring; the head says it too.
+    if time.is_none() || f.width(&label, &label_style) <= 30.0 {
+        central_text(c, f, rcx, rcy, &label, &label_style);
+    }
     let bx0 = CONTENT_X + 58.0 + 12.0;
     let big = Style::new(26.0, 700, color, 1.0).tab();
     let small = Style::new(13.0, 600, color, 1.0);
     let cap = cap_style();
-    let block_h = big.lh + 3.0 + cap.lh;
+    let block_h = big.lh + 3.0 + cap.lh + if time.is_some() { 1.0 + cap.lh } else { 0.0 };
     let by = y + (58.0 - block_h) / 2.0;
     let num = js_round(left).to_string();
     let base = by + f.baseline(&big);
     let nw = f.draw_at_baseline(c, bx0, base, &num, &big, 0.0).w;
     f.draw_at_baseline(c, bx0 + nw + 1.0, base, "%", &small, 0.0);
     f.draw(c, bx0, by + big.lh + 3.0, &i18n::left_used(inp.lang, js_round(w.used())), &cap, None, 0.0);
+    if let Some(p) = time {
+        let ly = by + big.lh + 3.0 + cap.lh + 1.0;
+        c.fill_circle(bx0 + 2.5, ly + cap.lh / 2.0, 2.5, time_color);
+        let x = bx0 + 5.0 + 4.0;
+        let time_text = i18n::time_left(inp.lang, js_round(p));
+        let diff = js_round(left) - js_round(p);
+        let pace = i18n::pace(inp.lang, diff);
+        let pace_color = match diff {
+            -2..=2 => MUTED,
+            ..0 => WARN,
+            _ => OK,
+        };
+        // Wider fonts on other systems: the verdict is the part that can go.
+        let lead = format!("{time_text} · ");
+        let lead_w = f.width(&lead, &cap);
+        if x + lead_w + f.width(&pace, &cap) <= CONTENT_X + CONTENT_W {
+            f.draw(c, x, ly, &lead, &cap, None, 0.0);
+            f.draw(c, x + lead_w, ly, &pace, &cap.color(pace_color), None, 0.0);
+        } else {
+            f.draw(c, x, ly, &time_text, &cap, None, 0.0);
+        }
+    }
 
     // ---------- rows ----------
     let rows = rows(inp);

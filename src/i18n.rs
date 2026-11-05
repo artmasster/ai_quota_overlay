@@ -381,6 +381,25 @@ pub fn left_used(l: Lang, p: i64) -> String {
         Lang::Th => format!("เหลือ · ใช้ไป {p}%"),
     }
 }
+/// How much of a window's time is left, under the numbers of how much of its quota is.
+pub fn time_left(l: Lang, p: i64) -> String {
+    match l {
+        Lang::En => format!("Time left {p}%"),
+        Lang::Th => format!("เวลาเหลือ {p}%"),
+    }
+}
+/// Quota left minus time left, in points: below zero it is going faster than the time allows.
+pub fn pace(l: Lang, diff: i64) -> String {
+    let d = diff.abs();
+    match (l, diff) {
+        (Lang::En, -2..=2) => "on pace".into(),
+        (Lang::En, ..0) => format!("{d}% too fast"),
+        (Lang::En, _) => format!("{d}% spare"),
+        (Lang::Th, -2..=2) => "พอดี".into(),
+        (Lang::Th, ..0) => format!("เร็วไป {d}%"),
+        (Lang::Th, _) => format!("เหลือเผื่อ {d}%"),
+    }
+}
 pub fn from_to(a: &str, b: &str) -> String {
     format!("v{a} → v{b}")
 }

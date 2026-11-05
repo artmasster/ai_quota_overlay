@@ -119,7 +119,7 @@ pub fn run(dir: &Path) -> std::io::Result<()> {
     // The README's images ("accounts…" ones show two Claude accounts and Copilot), then with AQO_SHOT_EXTRA=1 the
     // other states, to look at.
     let mut shots: Vec<(&str, Lang, bool, bool, Option<NetState>, Pop, Option<Quota>)> = vec![
-        ("hero", Lang::En, false, false, None, Pop::Panel(WORK, 0), None),
+        ("hero", Lang::En, false, false, None, Pop::Panel(WORK, 1), None),
         ("vertical", Lang::Th, true, false, None, Pop::Panel(CODEX, 1), None),
         ("offline", Lang::En, false, true, Some(NetState { online: false, ms: None }), Pop::None, None),
         (
@@ -140,6 +140,8 @@ pub fn run(dir: &Path) -> std::io::Result<()> {
             ("credits", Lang::En, false, false, None, Pop::Panel(CODEX, 1), None),
             ("network", Lang::En, false, true, Some(NetState { online: true, ms: Some(23) }), Pop::None, None),
             ("thai", Lang::Th, false, false, None, Pop::Panel(CLAUDE, 1), None),
+            ("billing", Lang::Th, false, false, None, Pop::Panel(CURSOR, 0), None),
+            ("accounts-copilot", Lang::Th, false, false, None, Pop::Panel("copilot-2c9e11", 0), None),
             ("accounts-vertical", Lang::Th, true, false, None, Pop::None, None),
             ("empty-network", Lang::En, false, true, Some(NetState { online: true, ms: Some(7) }), Pop::None, None),
             ("empty-vertical", Lang::Th, true, true, Some(NetState { online: true, ms: Some(7) }), Pop::None, None),
